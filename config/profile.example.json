@@ -1,0 +1,8 @@
+{
+  "opening_facts": ["AI解决方案", "AI项目", "Agent"],
+  "allowed_facts": ["AI解决方案", "AI Agent", "需求分析", "流程拆解", "Workflow", "Skill", "MCP", "API"],
+  "tech_facts": ["Workflow", "Skill", "MCP", "API"],
+  "output_facts": ["示例业务工作流", "示例Agent原型", "示例Skill"],
+  "forbidden_claims": ["精通Python", "熟练Python", "独立编写复杂生产代码", "资深软件工程师", "全栈开发专家"],
+  "greeting_context": ["请把这里替换为候选人已经确认的真实经历", "不得补写或夸大简历中没有的能力"]
+}

@@ -1,0 +1,40 @@
+from __future__ import annotations
+
+import re
+from typing import Any, Iterable
+
+DEEP_ANALYSIS_THRESHOLD = 75
+
+def validate_deep_analysis(raw: Any, allowed_facts: Iterable[str], forbidden_claims: Iterable[str]) -> dict[str, Any]:
+    if not isinstance(raw, dict): raise ValueError("深度分析必须是JSON对象")
+    strengths = _string_list(raw.get("strengths"), 3, 3, "核心匹配点")
+    risks = _string_list(raw.get("risks"), 1, 2, "主要风险")
+    evidence = _string_list(raw.get("evidence"), 2, 4, "履历事实")
+    recommendation = str(raw.get("recommendation") or "").strip()
+    if not 15 <= len(recommendation) <= 160: raise ValueError("投递建议必须为15—160字")
+    combined = " ".join(strengths + risks + evidence + [recommendation])
+    if re.search(r"https?://", combined, re.I): raise ValueError("深度分析不得包含或访问JD正文链接")
+    if any(term.lower() in combined.lower() for term in forbidden_claims): raise ValueError("深度分析包含未经确认的能力描述")
+    facts = [str(item).strip() for item in allowed_facts if str(item).strip()]
+    if facts and not any(fact.lower() in " ".join(evidence).lower() for fact in facts): raise ValueError("履历事实没有引用候选人已确认信息")
+    return {"strengths": strengths, "risks": risks, "evidence": evidence, "recommendation": recommendation}
+
+def apply_deep_analyses(jobs: list[Any], analyses: dict[str, Any] | None, allowed_facts: Iterable[str], forbidden_claims: Iterable[str]) -> list[str]:
+    provided = analyses if isinstance(analyses, dict) else {}; errors: list[str] = []
+    eligible_ids = {str(job.job_id) for job in jobs if int(job.score) >= DEEP_ANALYSIS_THRESHOLD and getattr(job, "eligibility_verdict", "pass") != "fail"}
+    for unknown in set(provided) - eligible_ids: errors.append(f"忽略未知或不符合门槛的岗位：{unknown}")
+    for job in jobs:
+        job.deep_analysis = None; job.deep_analysis_error = ""
+        if str(job.job_id) not in eligible_ids: continue
+        raw = provided.get(str(job.job_id))
+        if raw is None: job.deep_analysis_error = "深度分析未完成"; errors.append(f"{job.job_id} 深度分析缺失"); continue
+        try: job.deep_analysis = validate_deep_analysis(raw, allowed_facts, forbidden_claims)
+        except ValueError as exc: job.deep_analysis_error = f"深度分析未完成：{exc}"; errors.append(f"{job.job_id} {exc}")
+    return errors
+
+def _string_list(value: Any, minimum: int, maximum: int, label: str) -> list[str]:
+    if not isinstance(value, list): raise ValueError(f"{label}必须是数组")
+    items = [str(item).strip() for item in value if str(item).strip()]
+    if not minimum <= len(items) <= maximum: raise ValueError(f"{label}必须包含{minimum}—{maximum}项")
+    if any(len(item) > 120 for item in items): raise ValueError(f"{label}单项不能超过120字")
+    return items
