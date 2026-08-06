@@ -1,75 +1,92 @@
 # AI Job Matcher
 
-一个只在本机运行的AI岗位匹配面板。它读取智联与猎聘的职位信息，根据本机简历进行评分、排序和去重，并保存历史记录、人工处理状态与投递统计。
+![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-2457d6)
+![Local First](https://img.shields.io/badge/Data-Local%20First-087a55)
+![Read Only](https://img.shields.io/badge/Recruiting-Read%20Only-a15c00)
+![Tests](https://img.shields.io/badge/Tests-44%20passed-087a55)
 
-本项目只检索和分析，不会自动投递、打招呼或发送消息。
+![AI Job Matcher 项目概览](docs/demo/hero.svg)
 
-投递状态刻意只保留“未处理、已投递、不考虑”三种，避免要求用户持续维护复杂流程。
+一个只在本机运行的 AI 岗位匹配面板：读取智联与猎聘职位，基于完整 JD 和本机简历进行硬性条件判断、可解释评分、精读排序、历史去重与投递统计。
 
-## 主要功能
+> 只检索和分析。不会自动投递、打招呼、发送消息，也不会把简历或招聘平台登录信息上传到 GitHub。
 
-- 智联公开职位页与猎聘只读CLI的岗位读取
-- 完整JD六维评分、硬性条件识别、评分依据和统一排序
-- JD隐藏内容清理、可疑指令提示和不可信内容隔离
-- 岗位截止日期、7天内截止提醒和已截止排除
-- 75分以上岗位的可选Codex二阶段深度分析
-- 最近5个工作日报的手动能力差距报告
-- 统一的平台字段接口，便于增加新的只读职位来源
-- 同平台重复过滤、跨平台重复标记
-- SQLite本地历史记录与已投递/不考虑状态
-- 岗位首次发现、最近发现、出现天数和当日新增筛选
-- 今日、累计和最近14天投递统计
-- 不含简历原文的历史备份与恢复
-- 工作日定时生成HTML报告
-- 可选的本地候选人事实配置与招呼语校验
-
-硬性条件独立显示为“符合、需确认、明确不符”，不会增加投递状态。明确不符岗位保留在报告底部供核对，但不占推荐或补充名额。
-
-工作日脚本先准备候选岗位和提示文件。Codex根据提示分别生成招呼语JSON与深度分析JSON，再执行：
-
-```powershell
-.\.venv\Scripts\python.exe -m job_matcher.daily_report `
-  --candidates-json reports\YYYY-MM-DD-candidates.json `
-  --greetings-json reports\YYYY-MM-DD-greetings.json `
-  --deep-analysis-json reports\YYYY-MM-DD-deep-analysis.json `
-  --output reports\YYYY-MM-DD.html `
-  --report-date YYYY-MM-DD
+```text
+职位读取 → JD清理与硬条件判断 → 六维匹配评分 → 深度分析与招呼语 → 人工决定 → 历史去重与统计
 ```
 
-发布前运行 `python tools/security_checks.py --release`；GitHub自动测试也会执行相同的隐私检查。
+## 产品演示
 
-## 安装
+![AI Job Matcher 演示动画](docs/demo/walkthrough.gif)
 
-需要 Python 3.11 或更高版本，以及能够在本机运行的 `liepin-cli`。本仓库不包含招聘平台账号、授权信息或第三方CLI。
+所有演示内容均为虚构公司、虚构岗位和示例履历，不包含真实候选人信息。
+
+| 每日岗位总览 | 逐岗匹配分析 |
+| --- | --- |
+| ![每日岗位总览](docs/demo/dashboard.jpg) | ![逐岗匹配分析](docs/demo/job-analysis.jpg) |
+
+### 本机求职档案
+
+![本机求职档案设置](docs/demo/profile-settings.jpg)
+
+首次启动后，在网页中上传简历并填写城市、目标方向、最低薪资和排除关键词。简历文件与解析内容只保存在本机。
+
+## 核心能力
+
+| 能力 | 说明 |
+| --- | --- |
+| 双平台职位读取 | 读取智联公开职位页与猎聘只读 CLI，保留完整 JD |
+| 先排除、后评分 | 非目标岗位及明确硬条件不符岗位直接进入排除区，避免通用词造成虚高分 |
+| 可解释六维评分 | 展示岗位方向、核心职责、技术能力、业务领域、经验学历、地点薪资的分项证据 |
+| 二阶段深度分析 | 对 75 分以上岗位生成核心匹配点、主要风险、履历证据和投递建议 |
+| 个性化招呼语 | 依据岗位 JD 和本机确认的真实能力生成文案，支持复制但不自动发送 |
+| 去重与历史 | 识别同平台重复发布，标记跨平台重复，并按日期保存历史报告 |
+| 人工投递记录 | 只保留“未处理、已投递、不考虑”三种状态，并统计每日与累计投递量 |
+| 工作日运行 | 可设置周一至周五上午 9 点生成报告，周末自动跳过 |
+| 本机隐私保护 | 简历、数据库、报告、日志、密钥和平台授权均不进入仓库 |
+
+## 评分逻辑
+
+系统先判断岗位方向与硬性条件。非目标岗位，或明确要求但候选人没有证据的关键能力，会被标记为“明确不符”，不占推荐名额。
+
+通过基本判断的岗位再按 100 分计算：
+
+| 维度 | 分值 |
+| --- | ---: |
+| 岗位方向 | 30 |
+| 核心职责 | 25 |
+| 技术及工具能力 | 20 |
+| 业务领域 | 10 |
+| 经验与学历 | 10 |
+| 地点与薪资 | 5 |
+
+只有简历和 JD 中都有明确证据时才加分；未识别或未要求的维度不会自动获得满分。70 分为推荐线，75 分以上可进入二阶段深度分析。
+
+## 快速开始
+
+需要 Python 3.11 或更高版本，以及能够在本机运行的 `liepin-cli`。本仓库不包含招聘平台账号、授权信息或第三方 CLI。
 
 ```powershell
+git clone https://github.com/woshikros/ai-job-matcher.git
+cd ai-job-matcher
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -e ".[dev]"
-```
-
-启动本机面板：
-
-```powershell
 uvicorn job_matcher.web:app --host 127.0.0.1 --port 8000
 ```
 
-首次打开 <http://127.0.0.1:8000/> 会进入“我的求职档案”。上传简历，并填写工作城市、目标岗位方向、薪资、不考虑关键词以及可对外使用的真实能力。保存后，每日任务会直接读取本机档案，不需要再把简历路径写入脚本。简历和个人设置只保存在已被Git忽略的本机数据库与目录中。
+打开 <http://127.0.0.1:8000/>。首次使用需要完成“我的求职档案”：
 
-## 本机候选人配置
+1. 上传 PDF、DOCX 或 TXT 简历。
+2. 选择工作城市和一个或多个目标岗位方向。
+3. 设置最低薪资与不考虑的岗位关键词。
+4. 核对系统提取的技能、工具和项目成果。
 
-复制示例文件，但不要提交填写后的真实资料：
+未完成简历、城市和目标方向设置时，系统允许预览面板，但不会生成正式日报。
 
-```powershell
-Copy-Item config\profile.example.json config\profile.local.json
-$env:JOB_MATCHER_PROFILE = "config/profile.local.json"
-```
+## 生成每日报告
 
-`profile.local.json` 用于约束招呼语中允许出现的技术能力和真实成果，已被 `.gitignore` 排除。
-
-## 每日报告
-
-直接生成评分和历史报告，不生成招呼语：
+直接生成评分与历史报告：
 
 ```powershell
 .\.venv\Scripts\python.exe -m job_matcher.daily_report `
@@ -79,27 +96,27 @@ $env:JOB_MATCHER_PROFILE = "config/profile.local.json"
   --output "reports\2026-01-01.html"
 ```
 
-如果需要外部AI逐岗生成招呼语，可先使用 `--prepare-output` 生成候选JSON和提示文件，再通过 `--candidates-json`、`--greetings-json`、`--output` 完成严格校验后的渲染。个人事实始终来自本机配置。
+如需外部 AI 逐岗生成招呼语和深度分析，可先使用 `--prepare-output` 生成候选 JSON 与提示文件，再将生成结果交回报告命令进行字段、事实边界与长度校验。
 
 ## 工作日定时运行
 
-运行脚本会在周末自动跳过：
+手动运行一次工作日任务：
 
 ```powershell
 .\scripts\run-weekday.ps1
 ```
 
-安装周一至周五上午9点的Windows计划任务：
+安装周一至周五上午 9 点的 Windows 计划任务：
 
 ```powershell
 .\scripts\install-weekday-task.ps1
 ```
 
-也可将 `config/automation-prompt.example.md` 用作本地自动化任务说明。不要把当前电脑的自动任务配置或简历路径提交到仓库。
+周六、周日会自动跳过。也可将 `config/automation-prompt.example.md` 用作本机自动化任务说明。
 
-## 可选AI分析
+## 可选 AI 分析
 
-设置兼容OpenAI接口的环境变量后，评分结果可以附加AI分析。真实密钥只能设置在本机环境中：
+设置兼容 OpenAI 接口的本机环境变量后，可为评分结果补充 AI 分析。真实密钥只能放在本机环境中：
 
 ```powershell
 $env:LLM_BASE_URL = "https://your-service.example/v1"
@@ -107,10 +124,34 @@ $env:LLM_API_KEY = "your-local-key"
 $env:LLM_MODEL = "your-model"
 ```
 
+系统会把 JD 当作不可信数据：先清理隐藏字符、控制符和残留 HTML，不执行 JD 中的指令，也不会访问正文夹带的链接。
+
 ## 数据与隐私
 
-以下内容默认不会进入Git：简历、数据库、报告、日志、平台授权、环境变量、候选人本机配置和虚拟环境。提交前建议运行测试和隐私扫描。
+默认不会进入 Git 的内容包括：
+
+- 简历及简历解析结果
+- SQLite 数据库、历史报告和岗位记录
+- 招呼语结果、日志与备份
+- API 密钥、Cookie、平台授权和本机配置
+- 虚拟环境与临时文件
+
+发布前可运行：
 
 ```powershell
-python -m unittest discover -s tests -v
+python -m pytest -q
+python tools/security_checks.py --release
 ```
+
+GitHub 自动测试也会执行隐私检查，防止简历、数据库、令牌、本机绝对路径或个人资料误入仓库。
+
+## 项目边界
+
+- 本项目仅保留只读检索、分析和人工记录能力。
+- 不自动投递，不自动发送招呼语，不读取招聘聊天内容。
+- 招聘网站规则与页面可能变化，请低频、合理使用，并遵守对应平台的用户协议。
+- 所有评分只是辅助判断，最终是否投递由使用者决定。
+
+## 致谢
+
+README 的“先展示产品、再说明能力与安装”的组织方式参考了 [BossHunter](https://github.com/powerycy/BossHunter)。本项目没有复制其代码，也不包含自动投递、自动发送或聊天监测能力。

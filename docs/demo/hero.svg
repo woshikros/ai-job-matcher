@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="420" viewBox="0 0 1200 420" role="img" aria-labelledby="title desc">
+  <title id="title">AI Job Matcher</title>
+  <desc id="desc">本机运行的职位采集、匹配评分、精读分析和人工投递记录面板</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#101d40"/>
+      <stop offset="1" stop-color="#2f64e3"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="10" stdDeviation="12" flood-color="#0b1735" flood-opacity=".3"/>
+    </filter>
+  </defs>
+  <rect width="1200" height="420" rx="28" fill="url(#bg)"/>
+  <circle cx="1080" cy="68" r="170" fill="#fff" opacity=".05"/>
+  <circle cx="1125" cy="345" r="115" fill="#60a5fa" opacity=".12"/>
+  <g fill="#fff">
+    <text x="70" y="105" font-family="system-ui,Segoe UI,Microsoft YaHei" font-size="52" font-weight="800">AI Job Matcher</text>
+    <text x="72" y="150" font-family="system-ui,Segoe UI,Microsoft YaHei" font-size="22" opacity=".82">本机运行 · 完整JD精读 · 可解释评分 · 人工确认</text>
+  </g>
+  <g filter="url(#shadow)" font-family="system-ui,Segoe UI,Microsoft YaHei">
+    <rect x="70" y="205" width="185" height="112" rx="18" fill="#fff"/>
+    <text x="162" y="246" text-anchor="middle" fill="#2457d6" font-size="18" font-weight="700">只读采集</text>
+    <text x="162" y="278" text-anchor="middle" fill="#667085" font-size="15">智联 · 猎聘</text>
+    <text x="162" y="302" text-anchor="middle" fill="#667085" font-size="15">完整岗位职责</text>
+    <path d="M265 261h54" stroke="#8fb0ff" stroke-width="4" stroke-linecap="round"/>
+    <path d="m310 251 12 10-12 10" fill="none" stroke="#8fb0ff" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+    <rect x="330" y="205" width="185" height="112" rx="18" fill="#fff"/>
+    <text x="422" y="246" text-anchor="middle" fill="#2457d6" font-size="18" font-weight="700">先排除再评分</text>
+    <text x="422" y="278" text-anchor="middle" fill="#667085" font-size="15">岗位方向 · 硬条件</text>
+    <text x="422" y="302" text-anchor="middle" fill="#667085" font-size="15">六维证据评分</text>
+    <path d="M525 261h54" stroke="#8fb0ff" stroke-width="4" stroke-linecap="round"/>
+    <path d="m570 251 12 10-12 10" fill="none" stroke="#8fb0ff" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+    <rect x="590" y="205" width="185" height="112" rx="18" fill="#fff"/>
+    <text x="682" y="246" text-anchor="middle" fill="#2457d6" font-size="18" font-weight="700">逐岗精读</text>
+    <text x="682" y="278" text-anchor="middle" fill="#667085" font-size="15">匹配点 · 风险</text>
+    <text x="682" y="302" text-anchor="middle" fill="#667085" font-size="15">个性化招呼语</text>
+    <path d="M785 261h54" stroke="#8fb0ff" stroke-width="4" stroke-linecap="round"/>
+    <path d="m830 251 12 10-12 10" fill="none" stroke="#8fb0ff" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+    <rect x="850" y="205" width="280" height="112" rx="18" fill="#fff"/>
+    <text x="990" y="246" text-anchor="middle" fill="#087a55" font-size="18" font-weight="700">人工决定是否投递</text>
+    <text x="990" y="278" text-anchor="middle" fill="#667085" font-size="15">历史去重 · 投递统计</text>
+    <text x="990" y="302" text-anchor="middle" fill="#667085" font-size="15">不自动发送任何消息</text>
+  </g>
+  <text x="70" y="378" fill="#dbe7ff" font-family="system-ui,Segoe UI,Microsoft YaHei" font-size="17">简历、数据库、报告与平台授权始终保存在本机</text>
+</svg>
