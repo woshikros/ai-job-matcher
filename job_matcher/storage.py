@@ -7,6 +7,8 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from .recruiting import RECRUITER_TYPES, classify_recruiter, role_family
+
 DATA_DIR = Path("data")
 DB_PATH = DATA_DIR / "matcher.db"
 
@@ -58,6 +60,13 @@ def initialize() -> None:
             )"""
         )
         connection.execute(
+            """CREATE TABLE IF NOT EXISTS manual_greetings (
+                job_id TEXT NOT NULL, fingerprint TEXT NOT NULL, greeting TEXT NOT NULL,
+                version INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                PRIMARY KEY(job_id, fingerprint)
+            )"""
+        )
+        connection.execute(
             """CREATE TABLE IF NOT EXISTS source_validation_runs (
                 source TEXT NOT NULL,
                 run_date TEXT NOT NULL,
@@ -94,9 +103,23 @@ def initialize() -> None:
             PRIMARY KEY(report_date,source,job_id,fingerprint,skill))""")
         connection.execute("""CREATE TABLE IF NOT EXISTS skill_gap_reports (
             report_date TEXT PRIMARY KEY, generated_at TEXT NOT NULL, source_dates TEXT NOT NULL, payload TEXT NOT NULL)""")
+        connection.execute("""CREATE TABLE IF NOT EXISTS recruiter_overrides (
+            fingerprint TEXT PRIMARY KEY, recruiter_type TEXT NOT NULL CHECK(recruiter_type IN ('employer','headhunter','unknown')),
+            updated_at TEXT NOT NULL)""")
+        connection.execute("""CREATE TABLE IF NOT EXISTS application_records (
+            job_id TEXT PRIMARY KEY, source TEXT NOT NULL, fingerprint TEXT NOT NULL,
+            company TEXT NOT NULL DEFAULT '', job_name TEXT NOT NULL DEFAULT '', role_family TEXT NOT NULL DEFAULT '其他AI岗位',
+            recruiter_type TEXT NOT NULL DEFAULT 'unknown' CHECK(recruiter_type IN ('employer','headhunter','unknown')),
+            recruiter_name TEXT NOT NULL DEFAULT '', greeting_text TEXT NOT NULL DEFAULT '', greeting_strategy TEXT NOT NULL DEFAULT 'not_recorded',
+            job_url TEXT NOT NULL DEFAULT '', score INTEGER NOT NULL DEFAULT 0, applied_at TEXT NOT NULL,
+            feedback_status TEXT NOT NULL DEFAULT 'unknown' CHECK(feedback_status IN ('unknown','read_no_reply','replied','interview')),
+            note TEXT NOT NULL DEFAULT '', active INTEGER NOT NULL DEFAULT 1, updated_at TEXT NOT NULL)""")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_applications_search ON application_records(company,job_name,recruiter_name)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_applications_applied_at ON application_records(applied_at)")
         _migrate_platform_columns(connection)
         _backfill_job_sightings(connection)
         _backfill_skill_observations(connection)
+        _backfill_application_records(connection)
 
 
 def _columns(connection: sqlite3.Connection, table: str) -> set[str]:
@@ -152,6 +175,42 @@ def _backfill_skill_observations(connection: sqlite3.Connection) -> None:
                 (str(report_date), str(item.get("source", "liepin")), str(item.get("job_id", "")), str(item.get("fingerprint", "")), skill, "confirmed" if skill in matched else "missing", int(item.get("score", 0)), str(item.get("name", "")), str(item.get("company", ""))))
 
 
+def _latest_job_payload(connection: sqlite3.Connection, job_id: str, fingerprint: str) -> dict[str, Any]:
+    row = connection.execute("SELECT payload FROM daily_report_jobs WHERE job_id=? AND fingerprint=? ORDER BY report_date DESC LIMIT 1", (job_id, fingerprint)).fetchone()
+    if not row: return {}
+    try: return json.loads(row[0])
+    except (json.JSONDecodeError, TypeError): return {}
+
+def _application_snapshot(connection: sqlite3.Connection, job_id: str, source: str, fingerprint: str) -> dict[str, Any]:
+    payload = _latest_job_payload(connection, job_id, fingerprint)
+    override = connection.execute("SELECT recruiter_type FROM recruiter_overrides WHERE fingerprint=?", (fingerprint,)).fetchone()
+    recruiter_type = str(override[0]) if override else str(payload.get("recruiter_type") or "unknown")
+    manual = connection.execute("SELECT greeting FROM manual_greetings WHERE job_id=? AND fingerprint=?", (job_id, fingerprint)).fetchone()
+    greeting = str(manual[0]) if manual else str(payload.get("greeting") or "")
+    strategy = "not_recorded" if not greeting else ("headhunter_metrics" if recruiter_type == "headhunter" else str(payload.get("greeting_strategy") or "direct_custom"))
+    title = str(payload.get("name") or payload.get("jobName") or "")
+    return {"job_id": job_id, "source": source, "fingerprint": fingerprint, "company": str(payload.get("company") or "未记录"),
+            "job_name": title or "未记录", "role_family": role_family(title), "recruiter_type": recruiter_type,
+            "recruiter_name": str(payload.get("recruiter_name") or ""), "greeting_text": greeting, "greeting_strategy": strategy,
+            "job_url": str(payload.get("url") or payload.get("jobDetailUrl") or ""), "score": int(payload.get("score") or 0)}
+
+def _write_application_record(connection: sqlite3.Connection, job_id: str, source: str, fingerprint: str, applied_at: str, replace_snapshot: bool) -> None:
+    snapshot = _application_snapshot(connection, job_id, source, fingerprint); now = datetime.now().isoformat(timespec="seconds")
+    existing = connection.execute("SELECT 1 FROM application_records WHERE job_id=?", (job_id,)).fetchone()
+    if existing and not replace_snapshot:
+        connection.execute("UPDATE application_records SET active=1,updated_at=? WHERE job_id=?", (now, job_id)); return
+    connection.execute("""INSERT INTO application_records(job_id,source,fingerprint,company,job_name,role_family,recruiter_type,recruiter_name,greeting_text,greeting_strategy,job_url,score,applied_at,feedback_status,note,active,updated_at)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'unknown','',1,?) ON CONFLICT(job_id) DO UPDATE SET source=excluded.source,fingerprint=excluded.fingerprint,
+        company=excluded.company,job_name=excluded.job_name,role_family=excluded.role_family,recruiter_type=excluded.recruiter_type,
+        recruiter_name=excluded.recruiter_name,greeting_text=excluded.greeting_text,greeting_strategy=excluded.greeting_strategy,
+        job_url=excluded.job_url,score=excluded.score,applied_at=excluded.applied_at,feedback_status='unknown',note='',active=1,updated_at=excluded.updated_at""",
+        (snapshot["job_id"],snapshot["source"],snapshot["fingerprint"],snapshot["company"],snapshot["job_name"],snapshot["role_family"],snapshot["recruiter_type"],snapshot["recruiter_name"],snapshot["greeting_text"],snapshot["greeting_strategy"],snapshot["job_url"],snapshot["score"],applied_at,now))
+
+def _backfill_application_records(connection: sqlite3.Connection) -> None:
+    for job_id, source, fingerprint, applied_at in connection.execute("SELECT job_id,source,fingerprint,applied_at FROM job_statuses WHERE status='applied' AND applied_at IS NOT NULL").fetchall():
+        if not connection.execute("SELECT 1 FROM application_records WHERE job_id=?", (job_id,)).fetchone():
+            _write_application_record(connection, str(job_id), str(source), str(fingerprint), str(applied_at), True)
+
 def save_setting(key: str, value: Any) -> None:
     with closing(sqlite3.connect(DB_PATH)) as connection, connection:
         connection.execute("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, json.dumps(value, ensure_ascii=False)))
@@ -195,6 +254,10 @@ def set_job_status(job_id: str, fingerprint: str, status: str, source: str | Non
                  applied_at=excluded.applied_at""",
             (job_id, source or _source_from_job_id(job_id), fingerprint, status, now, applied_at),
         )
+        if status == "applied" and applied_at:
+            _write_application_record(connection, job_id, source or _source_from_job_id(job_id), fingerprint, applied_at, not existing or existing[0] != "applied")
+        else:
+            connection.execute("UPDATE application_records SET active=0,updated_at=? WHERE job_id=?", (now, job_id))
 
 
 def get_application_statistics(days: int = 14, as_of: date | None = None) -> dict[str, Any]:
@@ -230,8 +293,84 @@ def get_application_statistics(days: int = 14, as_of: date | None = None) -> dic
         "days": days,
         "daily": daily,
         "max_daily": max((item["count"] for item in daily), default=0),
+        "review_target": 50, "review_available": total >= 50, "review_progress": total,
     }
 
+def set_recruiter_override(fingerprint: str, recruiter_type: str) -> None:
+    if recruiter_type not in RECRUITER_TYPES: raise ValueError("无效招聘者类型")
+    initialize(); now = datetime.now().isoformat(timespec="seconds")
+    with closing(sqlite3.connect(DB_PATH)) as connection, connection:
+        connection.execute("INSERT INTO recruiter_overrides(fingerprint,recruiter_type,updated_at) VALUES(?,?,?) ON CONFLICT(fingerprint) DO UPDATE SET recruiter_type=excluded.recruiter_type,updated_at=excluded.updated_at", (fingerprint,recruiter_type,now))
+        connection.execute("UPDATE application_records SET recruiter_type=?,updated_at=? WHERE fingerprint=?", (recruiter_type,now,fingerprint))
+
+def get_recruiter_overrides(fingerprints: list[str]) -> dict[str,str]:
+    if not fingerprints: return {}
+    initialize(); placeholders = ",".join("?" for _ in fingerprints)
+    with closing(sqlite3.connect(DB_PATH)) as connection:
+        rows = connection.execute(f"SELECT fingerprint,recruiter_type FROM recruiter_overrides WHERE fingerprint IN ({placeholders})", fingerprints).fetchall()
+    return {str(row[0]):str(row[1]) for row in rows}
+
+def search_application_records(query: str = "", source: str = "all", recruiter_type: str = "all", feedback_status: str = "all", role: str = "all", date_from: str = "", date_to: str = "") -> list[dict[str,Any]]:
+    initialize(); clauses=["active=1"]; values:list[Any]=[]
+    if query.strip(): clauses.append("(company LIKE ? OR job_name LIKE ? OR recruiter_name LIKE ? OR greeting_text LIKE ? OR note LIKE ?)"); token=f"%{query.strip()}%"; values.extend([token]*5)
+    if source != "all": clauses.append("source=?"); values.append(source)
+    if recruiter_type != "all": clauses.append("recruiter_type=?"); values.append(recruiter_type)
+    if feedback_status != "all": clauses.append("feedback_status=?"); values.append(feedback_status)
+    if role != "all": clauses.append("role_family=?"); values.append(role)
+    if date_from: clauses.append("substr(applied_at,1,10)>=?"); values.append(date_from)
+    if date_to: clauses.append("substr(applied_at,1,10)<=?"); values.append(date_to)
+    with closing(sqlite3.connect(DB_PATH)) as connection:
+        connection.row_factory=sqlite3.Row; rows=connection.execute(f"SELECT * FROM application_records WHERE {' AND '.join(clauses)} ORDER BY applied_at DESC",values).fetchall()
+    return [dict(row) for row in rows]
+
+def update_application_record(job_id: str, *, feedback_status: str|None=None, note: str|None=None, greeting_text: str|None=None, recruiter_type: str|None=None) -> dict[str,Any]|None:
+    if feedback_status is not None and feedback_status not in {"unknown","read_no_reply","replied","interview"}: raise ValueError("无效反馈状态")
+    if recruiter_type is not None and recruiter_type not in RECRUITER_TYPES: raise ValueError("无效招聘者类型")
+    initialize(); assignments=["updated_at=?"]; values:list[Any]=[datetime.now().isoformat(timespec="seconds")]
+    for column,value in (("feedback_status",feedback_status),("note",note),("greeting_text",greeting_text),("recruiter_type",recruiter_type)):
+        if value is not None: assignments.append(f"{column}=?"); values.append(str(value)[:1000] if column in {"note","greeting_text"} else value)
+    values.append(job_id)
+    with closing(sqlite3.connect(DB_PATH)) as connection, connection:
+        connection.execute(f"UPDATE application_records SET {','.join(assignments)} WHERE job_id=? AND active=1",values); connection.row_factory=sqlite3.Row
+        row=connection.execute("SELECT * FROM application_records WHERE job_id=? AND active=1",(job_id,)).fetchone()
+    return dict(row) if row else None
+
+def get_application_review(as_of: date|None=None, minimum_group: int=5) -> dict[str,Any]:
+    reference=as_of or date.today(); mature_before=(reference-timedelta(days=3)).isoformat(); rows=search_application_records(); mature=[row for row in rows if str(row["applied_at"])[:10]<=mature_before]
+    labels={"source":{"liepin":"猎聘","zhilian":"智联招聘","zhipin":"Boss直聘"},"recruiter_type":{"employer":"企业招聘方","headhunter":"猎头","unknown":"待确认"},"greeting_strategy":{"direct_custom":"定制话术","headhunter_metrics":"猎头硬指标话术","not_recorded":"话术未记录"}}
+    def metrics(items):
+        total=len(items); read=sum(row["feedback_status"]!="unknown" for row in items); replied=sum(row["feedback_status"] in {"replied","interview"} for row in items); interview=sum(row["feedback_status"]=="interview" for row in items)
+        return {"total":total,"read":read,"replied":replied,"interview":interview,"unknown":total-read,"read_rate":round(read*100/total) if total else 0,"reply_rate":round(replied*100/total) if total else 0,"interview_rate":round(interview*100/total) if total else 0,"enough_sample":total>=minimum_group}
+    groups={}
+    for field in ("role_family","source","recruiter_type","greeting_strategy"):
+        buckets={}
+        for row in mature: buckets.setdefault(str(row[field]),[]).append(row)
+        groups[field]=[{"key":key,"label":labels.get(field,{}).get(key,key),**metrics(items)} for key,items in sorted(buckets.items(),key=lambda pair:len(pair[1]),reverse=True)]
+    return {"available":len(rows)>=50,"total":len(rows),"observing":len(rows)-len(mature),"mature_total":len(mature),"overall":metrics(mature),"groups":groups,"minimum_group":minimum_group,"as_of":reference.isoformat()}
+
+
+def get_manual_greeting(job_id: str, fingerprint: str) -> dict[str,Any]|None:
+    initialize()
+    with closing(sqlite3.connect(DB_PATH)) as connection:
+        row=connection.execute("SELECT greeting,version,created_at,updated_at FROM manual_greetings WHERE job_id=? AND fingerprint=?",(job_id,fingerprint)).fetchone()
+    return {"job_id":job_id,"fingerprint":fingerprint,"greeting":str(row[0]),"version":int(row[1]),"created_at":str(row[2]),"updated_at":str(row[3])} if row else None
+
+def save_manual_greeting(job_id: str, fingerprint: str, greeting: str, version: int) -> dict[str,Any]:
+    initialize(); now=datetime.now().isoformat(timespec="seconds")
+    with closing(sqlite3.connect(DB_PATH)) as connection, connection:
+        connection.execute("""INSERT INTO manual_greetings(job_id,fingerprint,greeting,version,created_at,updated_at) VALUES(?,?,?,?,?,?)
+            ON CONFLICT(job_id,fingerprint) DO UPDATE SET greeting=excluded.greeting,version=excluded.version,updated_at=excluded.updated_at""",(job_id,fingerprint,greeting,version,now,now))
+    return get_manual_greeting(job_id,fingerprint) or {}
+
+def delete_manual_greeting(job_id: str, fingerprint: str) -> None:
+    initialize()
+    with closing(sqlite3.connect(DB_PATH)) as connection, connection: connection.execute("DELETE FROM manual_greetings WHERE job_id=? AND fingerprint=?",(job_id,fingerprint))
+
+def find_report_job(job_id: str, fingerprint: str) -> dict[str,Any]|None:
+    initialize()
+    with closing(sqlite3.connect(DB_PATH)) as connection:
+        row=connection.execute("SELECT payload FROM daily_report_jobs WHERE job_id=? AND fingerprint=? ORDER BY report_date DESC LIMIT 1",(job_id,fingerprint)).fetchone()
+    return json.loads(row[0]) if row else None
 
 def get_job_statuses(job_ids: list[str]) -> dict[str, str]:
     if not job_ids:
@@ -456,10 +595,17 @@ def load_daily_report(report_date: str | None = None) -> tuple[str | None, list[
     jobs = [json.loads(row[0]) for row in rows]
     statuses = get_job_statuses([str(item["job_id"]) for item in jobs])
     sightings = get_job_sightings([str(item["job_id"]) for item in jobs])
+    overrides = get_recruiter_overrides([str(item.get("fingerprint", "")) for item in jobs])
     for item in jobs:
         item["status"] = statuses.get(str(item["job_id"]), "pending")
         item.update(sightings.get(str(item["job_id"]), {}))
         item["is_new"] = item.get("first_seen") == report_date
+        if not item.get("recruiter_type"):
+            identity=classify_recruiter(item,str(item.get("detail") or "")); item.update({"recruiter_type":identity.recruiter_type,"recruiter_name":identity.name,"recruiter_title":identity.title,"recruiter_evidence":identity.evidence,"greeting_strategy":"headhunter_metrics" if identity.recruiter_type=="headhunter" else "direct_custom"})
+        override=overrides.get(str(item.get("fingerprint", "")))
+        if override: item["recruiter_type"]=override; item["recruiter_evidence"]="已按人工设置"; item["greeting_strategy"]="headhunter_metrics" if override=="headhunter" else "direct_custom"
+        item["greeting_manual"]=False; manual=get_manual_greeting(str(item["job_id"]),str(item["fingerprint"]))
+        if manual: item["greeting"]=manual["greeting"]; item["greeting_version"]=manual["version"]; item["greeting_manual"]=True
     return report_date, jobs
 
 

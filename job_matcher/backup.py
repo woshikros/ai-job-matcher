@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import Any
 from . import storage
 
-TABLES = ("settings", "searches", "job_statuses", "daily_reports", "daily_report_jobs", "manual_greetings", "source_validation_runs", "source_settings", "job_sightings", "deep_analyses", "skill_observations", "skill_gap_reports")
+TABLES = ("settings", "searches", "job_statuses", "daily_reports", "daily_report_jobs", "manual_greetings", "source_validation_runs", "source_settings", "job_sightings", "deep_analyses", "skill_observations", "skill_gap_reports", "recruiter_overrides", "application_records")
 PRIVATE_SETTING_KEYS = {"resume_text", "resume_name", "candidate_profile", "preferences"}
 
 def export_backup() -> dict[str, Any]:

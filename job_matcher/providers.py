@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Protocol
 
-PROVIDER_FIELDS = ("source", "sourceJobId", "jobId", "jobName", "company", "location", "salary", "education", "workYears", "industry", "jobDetailUrl", "publishedAt", "deadline")
+PROVIDER_FIELDS = ("source", "sourceJobId", "jobId", "jobName", "company", "location", "salary", "education", "workYears", "industry", "jobDetailUrl", "publishedAt", "deadline", "recruiterName", "recruiterTitle")
 
 class JobProvider(Protocol):
     """Contract implemented by optional read-only job sources."""
@@ -28,6 +28,8 @@ def normalise_provider_job(job: dict[str, Any], source: str) -> dict[str, Any]:
         "jobDetailUrl": str(result.get("jobDetailUrl") or result.get("url") or ""),
         "publishedAt": str(result.get("publishedAt") or result.get("publishTime") or result.get("datePosted") or ""),
         "deadline": str(result.get("deadline") or result.get("applicationDeadline") or result.get("endDate") or ""),
+        "recruiterName": str(result.get("recruiterName") or result.get("bossName") or result.get("hrName") or ""),
+        "recruiterTitle": str(result.get("recruiterTitle") or result.get("bossTitle") or ""),
     })
     return result
 

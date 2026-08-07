@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any, Iterable
 
+from .recruiting import detect_outsourcing
+
 MAX_JOB_TEXT_LENGTH = 30_000
 _HIDDEN = re.compile(r"[\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff]")
 _TAG = re.compile(r"<[^>]+>")
@@ -70,6 +72,8 @@ def posting_status(deadline: str, as_of: date | None = None) -> str:
 
 def evaluate_eligibility(resume_text: str, job: dict[str, Any], detail: str, deadline_status: str, target_city: str | Iterable[str] = "深圳", excluded_keywords: Iterable[str] | None = None) -> EligibilityResult:
     resume_lower, detail_lower, failures, flags = resume_text.lower(), detail.lower(), [], []
+    outsourcing_reason = detect_outsourcing(job, detail)
+    if outsourcing_reason: failures.append(f"明确外包：{outsourcing_reason}")
     education = str(job.get("education") or job.get("jobDegree") or "")
     if ("博士" in education or re.search(r"博士(?:学历|及以上|以上)", detail)) and "博士" not in resume_text: failures.append("明确要求博士学历，简历没有相应证据")
     elif ("硕士" in education or re.search(r"硕士(?:学历|及以上|以上)", detail)) and not any(x in resume_text for x in ("硕士", "博士")): failures.append("明确要求硕士及以上学历，简历没有相应证据")

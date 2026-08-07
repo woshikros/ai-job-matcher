@@ -14,13 +14,17 @@ from pydantic import BaseModel
 from .candidate_profile import ROLE_OPTIONS, extract_profile_suggestions, get_candidate_profile, profile_is_complete, save_candidate_profile
 from .cli_client import LiepinCliError, search_jobs
 from .backup import export_backup, parse_backup, restore_backup
+from .greetings import generate_headhunter_greeting, generate_local_greeting
+from .recruiting import RECRUITER_TYPES
 from .resume import ResumeReadError, extract_resume_text
 from .scoring import job_text, score_job
 from .salary import DEFAULT_SALARY_UPPER_FLOOR, SALARY_OPTIONS, normalise_salary_floor
 from .skill_gaps import generate_skill_gap_report
 from .storage import (
-    DATA_DIR, get_application_statistics, get_report_summary, get_setting, get_source_health, initialize, list_report_dates, list_skill_gap_report_dates, load_daily_report, load_skill_gap_report,
-    save_search, save_setting, set_job_status,
+    DATA_DIR, delete_manual_greeting, find_report_job, get_application_review, get_application_statistics,
+    get_manual_greeting, get_report_summary, get_setting, get_source_health, initialize, list_report_dates,
+    list_skill_gap_report_dates, load_daily_report, load_skill_gap_report, save_manual_greeting, save_search,
+    save_setting, search_application_records, set_job_status, set_recruiter_override, update_application_record,
 )
 
 app = FastAPI(title="双平台AI岗位面板")
@@ -34,6 +38,15 @@ UPLOADS = Path("uploads")
 def startup() -> None:
     initialize()
     UPLOADS.mkdir(exist_ok=True)
+    _refresh_existing_headhunter_greetings()
+
+def _refresh_existing_headhunter_greetings() -> None:
+    _, jobs=load_daily_report()
+    for job in jobs:
+        if job.get("recruiter_type")!="headhunter" or int(job.get("score",0))<70 or job.get("is_excluded") or str(job.get("greeting") or "").startswith("硬指标清单："): continue
+        try:
+            existing=get_manual_greeting(str(job["job_id"]),str(job["fingerprint"])); version=int(existing["version"])+1 if existing else 1; greeting=generate_headhunter_greeting(job,version); save_manual_greeting(str(job["job_id"]),str(job["fingerprint"]),greeting,version)
+        except (KeyError,ValueError): continue
 
 
 @app.get("/api/health")
@@ -71,6 +84,7 @@ def dashboard(request: Request, date: str | None = None, status: str = "all", so
             "report_dates": report_dates, "status_filter": status,
             "source_filter": source, "freshness_filter": freshness, "source_health": source_health,
             "application_stats": get_application_statistics(),
+            "application_review": get_application_review(),
             "source_labels": {"liepin": "猎聘", "zhilian": "智联招聘"},
             "latest_skill_gap_report": load_skill_gap_report(),
             "candidate_profile": profile, "profile_complete": profile_complete,
@@ -120,6 +134,20 @@ class StatusUpdate(BaseModel):
     fingerprint: str
     source: str | None = None
 
+class GreetingRequest(BaseModel):
+    fingerprint: str
+    regenerate: bool = False
+
+class RecruiterUpdate(BaseModel):
+    fingerprint: str
+    recruiter_type: str
+
+class ApplicationUpdate(BaseModel):
+    feedback_status: str | None = None
+    note: str | None = None
+    greeting_text: str | None = None
+    recruiter_type: str | None = None
+
 
 @app.post("/api/jobs/{job_id}/status")
 def update_job_status(job_id: str, payload: StatusUpdate):
@@ -127,6 +155,47 @@ def update_job_status(job_id: str, payload: StatusUpdate):
         return JSONResponse({"error": "无效状态"}, status_code=400)
     set_job_status(job_id, payload.fingerprint, payload.status, payload.source)
     return {"ok": True, "job_id": job_id, "status": payload.status, "statistics": get_application_statistics()}
+
+@app.post("/api/jobs/{job_id}/recruiter")
+def update_recruiter(job_id: str, payload: RecruiterUpdate):
+    if payload.recruiter_type not in RECRUITER_TYPES: return JSONResponse({"error":"无效招聘者类型"},status_code=400)
+    job=find_report_job(job_id,payload.fingerprint)
+    if not job: return JSONResponse({"error":"岗位不存在或岗位内容已更新"},status_code=404)
+    set_recruiter_override(payload.fingerprint,payload.recruiter_type); existing=get_manual_greeting(job_id,payload.fingerprint); version=int(existing["version"])+1 if existing else 1; job["recruiter_type"]=payload.recruiter_type
+    if payload.recruiter_type=="headhunter": greeting=generate_headhunter_greeting(job,version); save_manual_greeting(job_id,payload.fingerprint,greeting,version)
+    elif int(job.get("score",0))<70: greeting=generate_local_greeting(job,version); save_manual_greeting(job_id,payload.fingerprint,greeting,version)
+    else: delete_manual_greeting(job_id,payload.fingerprint); greeting=str(job.get("greeting") or "")
+    return {"ok":True,"recruiter_type":payload.recruiter_type,"greeting":greeting}
+
+@app.post("/api/jobs/{job_id}/greeting")
+def create_low_score_greeting(job_id: str, payload: GreetingRequest):
+    job=find_report_job(job_id,payload.fingerprint)
+    if not job: return JSONResponse({"error":"岗位不存在或岗位内容已更新"},status_code=404)
+    if int(job.get("score",0))>=70: return JSONResponse({"error":"70分以上岗位使用每日定制招呼语"},status_code=400)
+    existing=get_manual_greeting(job_id,payload.fingerprint)
+    if existing and not payload.regenerate: return {"ok":True,**existing}
+    from .storage import get_recruiter_overrides
+    override=get_recruiter_overrides([payload.fingerprint]).get(payload.fingerprint)
+    if override: job["recruiter_type"]=override
+    version=int(existing["version"])+1 if existing else 1; greeting=generate_local_greeting(job,version); saved=save_manual_greeting(job_id,payload.fingerprint,greeting,version)
+    return {"ok":True,**saved}
+
+@app.get("/applications",response_class=HTMLResponse)
+def applications(request: Request,q: str="",source: str="all",recruiter_type: str="all",feedback: str="all",role: str="all",date_from: str="",date_to: str=""):
+    rows=search_application_records(q,source,recruiter_type,feedback,role,date_from,date_to); role_options=sorted({str(item["role_family"]) for item in search_application_records()})
+    return templates.TemplateResponse(request,"applications.html",{"records":rows,"q":q,"source_filter":source,"recruiter_filter":recruiter_type,"feedback_filter":feedback,"role_filter":role,"date_from":date_from,"date_to":date_to,"role_options":role_options,"statistics":get_application_statistics()})
+
+@app.post("/api/applications/{job_id}")
+def update_application(job_id: str,payload: ApplicationUpdate):
+    try: record=update_application_record(job_id,feedback_status=payload.feedback_status,note=payload.note,greeting_text=payload.greeting_text,recruiter_type=payload.recruiter_type)
+    except ValueError as exc: return JSONResponse({"error":str(exc)},status_code=400)
+    if not record: return JSONResponse({"error":"没有找到该投递记录"},status_code=404)
+    if payload.recruiter_type: set_recruiter_override(str(record["fingerprint"]),payload.recruiter_type)
+    return {"ok":True,"record":record}
+
+@app.get("/application-review",response_class=HTMLResponse)
+def application_review(request: Request):
+    return templates.TemplateResponse(request,"application_review.html",{"review":get_application_review()})
 
 
 @app.get("/api/statistics/applications")
