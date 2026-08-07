@@ -1,6 +1,9 @@
+param([switch]$NoBrowser)
+
 $ErrorActionPreference = "Stop"
 $projectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $dashboardUrl = "http://127.0.0.1:8000/"
+$healthUrl = "http://127.0.0.1:8000/api/health"
 $logDir = Join-Path $projectRoot "logs"
 $stdoutLog = Join-Path $logDir "dashboard.out.log"
 $stderrLog = Join-Path $logDir "dashboard.error.log"
@@ -8,8 +11,8 @@ New-Item -ItemType Directory -Path $logDir -Force | Out-Null
 
 function Test-Dashboard {
     try {
-        $response = Invoke-WebRequest -Uri $dashboardUrl -UseBasicParsing -TimeoutSec 2
-        return $response.StatusCode -eq 200 -and $response.Content -match "每日AI岗位精读"
+        $response = Invoke-RestMethod -Uri $healthUrl -TimeoutSec 5
+        return $response.ok -eq $true -and $response.service -eq "ai-job-matcher"
     } catch {
         return $false
     }
@@ -18,6 +21,10 @@ function Test-Dashboard {
 if (-not (Test-Dashboard)) {
     $python = Join-Path $projectRoot ".venv\Scripts\python.exe"
     if (-not (Test-Path -LiteralPath $python)) {
+        if ($NoBrowser) {
+            Write-Error "没有找到本机运行环境：$python"
+            exit 1
+        }
         Add-Type -AssemblyName PresentationFramework
         [System.Windows.MessageBox]::Show("没有找到本机运行环境：$python", "AI岗位面板") | Out-Null
         exit 1
@@ -39,7 +46,9 @@ if (-not (Test-Dashboard)) {
 }
 
 if (Test-Dashboard) {
-    Start-Process $dashboardUrl
+    if (-not $NoBrowser) {
+        Start-Process $dashboardUrl
+    }
     exit 0
 }
 
@@ -50,6 +59,10 @@ if (Test-Path -LiteralPath $stderrLog) {
         $errorText += [Environment]::NewLine + [Environment]::NewLine + $tail
     }
 }
-Add-Type -AssemblyName PresentationFramework
-[System.Windows.MessageBox]::Show($errorText, "AI岗位面板") | Out-Null
+if ($NoBrowser) {
+    Write-Error $errorText
+} else {
+    Add-Type -AssemblyName PresentationFramework
+    [System.Windows.MessageBox]::Show($errorText, "AI岗位面板") | Out-Null
+}
 exit 1

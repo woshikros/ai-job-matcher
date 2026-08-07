@@ -8,9 +8,10 @@ from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 import job_matcher.storage as storage
 from job_matcher.daily_report import _score, select_jobs
-from job_matcher.deep_analysis import apply_deep_analyses
+from job_matcher.deep_analysis import apply_deep_analyses, require_complete_deep_analyses
 from job_matcher.job_safety import clean_job_text, evaluate_eligibility, extract_deadline, posting_status
 from job_matcher.skill_gaps import build_skill_observations, generate_skill_gap_report
+from job_matcher.web import health
 
 class JobSafetyTests(unittest.TestCase):
     def test_cleans_untrusted_content_without_following_links(self):
@@ -36,6 +37,11 @@ class DeepAnalysisTests(unittest.TestCase):
         job = self._job(); before = job.score
         raw = {"liepin:1": {"strengths": ["一", "二", "三"], "risks": ["风险"], "evidence": ["精通Python", "Workflow"], "recommendation": "建议优先投递并补充相关项目事实后再进行沟通。"}}
         self.assertTrue(apply_deep_analyses([job], raw, ["Workflow"], ["精通Python"])); self.assertIsNone(job.deep_analysis); self.assertEqual(job.score, before)
+    def test_final_report_requires_every_eligible_analysis(self):
+        job = self._job(); apply_deep_analyses([job], {}, ["Workflow"], ["精通Python"])
+        with self.assertRaisesRegex(ValueError, "深度分析未完成"): require_complete_deep_analyses([job])
+        raw = {"liepin:1": {"strengths": ["匹配需求分析", "匹配方案设计", "匹配交付推进"], "risks": ["编码深度需确认"], "evidence": ["熟悉Workflow", "具备需求分析经验"], "recommendation": "建议优先投递，并重点展示从需求到交付的完整实践。"}}
+        apply_deep_analyses([job], raw, ["Workflow", "需求分析"], ["精通Python"]); require_complete_deep_analyses([job])
 
 class SelectionAndGapTests(unittest.TestCase):
     def test_embedded_architect_is_excluded_from_ai_targets(self):
@@ -62,6 +68,7 @@ class SelectionAndGapTests(unittest.TestCase):
         self.assertEqual(states["Workflow"], "confirmed"); self.assertEqual(states["MCP"], "weak"); self.assertEqual(states["Python"], "missing")
 
 class TemplateSafetyTests(unittest.TestCase):
+    def test_dashboard_health_contract(self): self.assertEqual(health(), {"ok": True, "service": "ai-job-matcher"})
     def test_dashboard_escapes_text_and_renders_deep_review(self):
         env = Environment(loader=FileSystemLoader(Path(__file__).parents[1] / "templates"), autoescape=select_autoescape(["html"]))
         job = {"score": 80, "tier": "优先沟通", "job_id": "liepin:1", "source": "liepin", "fingerprint": "fp", "name": "FDE", "company": "<script>alert(1)</script>", "location": "深圳", "salary": "20-30K", "work_years": "3年", "education": "本科", "industry": "AI", "matched": [], "gaps": [], "verdict": "匹配", "greeting": None, "is_supplemental": False, "status": "pending", "detail": "安全JD", "url": "https://example.com", "duplicate_group": None, "is_excluded": False, "deadline": "2026-08-10", "posting_status": "closing_soon", "eligibility_verdict": "pass", "content_warnings": [], "deep_analysis": {"strengths": ["一", "二", "三"], "risks": ["风险"], "evidence": ["事实一", "事实二"], "recommendation": "建议优先投递"}}

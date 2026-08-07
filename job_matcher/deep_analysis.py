@@ -21,7 +21,12 @@ def validate_deep_analysis(raw: Any, allowed_facts: Iterable[str], forbidden_cla
 
 def apply_deep_analyses(jobs: list[Any], analyses: dict[str, Any] | None, allowed_facts: Iterable[str], forbidden_claims: Iterable[str]) -> list[str]:
     provided = analyses if isinstance(analyses, dict) else {}; errors: list[str] = []
-    eligible_ids = {str(job.job_id) for job in jobs if int(job.score) >= DEEP_ANALYSIS_THRESHOLD and getattr(job, "eligibility_verdict", "pass") != "fail"}
+    eligible_ids = {
+        str(job.job_id) for job in jobs
+        if int(job.score) >= DEEP_ANALYSIS_THRESHOLD
+        and getattr(job, "eligibility_verdict", "pass") != "fail"
+        and not getattr(job, "is_excluded", False)
+    }
     for unknown in set(provided) - eligible_ids: errors.append(f"忽略未知或不符合门槛的岗位：{unknown}")
     for job in jobs:
         job.deep_analysis = None; job.deep_analysis_error = ""
@@ -31,6 +36,21 @@ def apply_deep_analyses(jobs: list[Any], analyses: dict[str, Any] | None, allowe
         try: job.deep_analysis = validate_deep_analysis(raw, allowed_facts, forbidden_claims)
         except ValueError as exc: job.deep_analysis_error = f"深度分析未完成：{exc}"; errors.append(f"{job.job_id} {exc}")
     return errors
+
+def require_complete_deep_analyses(jobs: list[Any]) -> None:
+    missing = [
+        str(job.job_id) for job in jobs
+        if int(job.score) >= DEEP_ANALYSIS_THRESHOLD
+        and getattr(job, "eligibility_verdict", "pass") != "fail"
+        and not getattr(job, "is_excluded", False)
+        and not getattr(job, "deep_analysis", None)
+    ]
+    if missing:
+        raise ValueError(
+            "以下75分以上岗位的深度分析未完成："
+            + "、".join(missing)
+            + "。请补齐或修正深度分析JSON后重新生成报告。"
+        )
 
 def _string_list(value: Any, minimum: int, maximum: int, label: str) -> list[str]:
     if not isinstance(value, list): raise ValueError(f"{label}必须是数组")

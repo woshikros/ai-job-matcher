@@ -36,6 +36,11 @@ def startup() -> None:
     UPLOADS.mkdir(exist_ok=True)
 
 
+@app.get("/api/health")
+def health():
+    return {"ok": True, "service": "ai-job-matcher"}
+
+
 @app.get("/", response_class=HTMLResponse)
 def dashboard(request: Request, date: str | None = None, status: str = "all", source: str = "all", freshness: str = "all"):
     profile = get_candidate_profile()
