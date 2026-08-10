@@ -54,8 +54,17 @@ def health():
     return {"ok": True, "service": "ai-job-matcher"}
 
 
+def _filter_recruiter_type(jobs: list[dict], recruiter_type: str) -> list[dict]:
+    if recruiter_type in RECRUITER_TYPES:
+        return [item for item in jobs if str(item.get("recruiter_type") or "unknown") == recruiter_type]
+    return jobs
+
+
 @app.get("/", response_class=HTMLResponse)
-def dashboard(request: Request, date: str | None = None, status: str = "all", source: str = "all", freshness: str = "all"):
+def dashboard(
+    request: Request, date: str | None = None, status: str = "all", source: str = "all",
+    recruiter_type: str = "all", freshness: str = "all",
+):
     profile = get_candidate_profile()
     profile_complete = profile_is_complete(profile)
     report_date, jobs = load_daily_report(date)
@@ -63,6 +72,7 @@ def dashboard(request: Request, date: str | None = None, status: str = "all", so
         jobs = [item for item in jobs if item.get("status") == status]
     if source in {"liepin", "zhilian"}:
         jobs = [item for item in jobs if item.get("source", "liepin") == source]
+    jobs = _filter_recruiter_type(jobs, recruiter_type)
     jobs = _filter_freshness(jobs, freshness)
     report_dates = list_report_dates()
     summary = get_report_summary(report_date)
@@ -82,7 +92,8 @@ def dashboard(request: Request, date: str | None = None, status: str = "all", so
             "supplemental": sum(bool(item.get("is_supplemental")) and not item.get("is_excluded") for item in jobs),
             "excluded_count": sum(bool(item.get("is_excluded")) for item in jobs),
             "report_dates": report_dates, "status_filter": status,
-            "source_filter": source, "freshness_filter": freshness, "source_health": source_health,
+            "source_filter": source, "recruiter_filter": recruiter_type,
+            "freshness_filter": freshness, "source_health": source_health,
             "application_stats": get_application_statistics(),
             "application_review": get_application_review(),
             "source_labels": {"liepin": "猎聘", "zhilian": "智联招聘"},

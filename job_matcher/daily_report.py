@@ -16,6 +16,7 @@ from jinja2 import Environment, FileSystemLoader, select_autoescape
 from .candidate_profile import get_candidate_profile, profile_facts, profile_is_complete, profile_queries
 from .cli_client import search_jobs
 from .deep_analysis import apply_deep_analyses
+from .greetings import validate_complete_greeting
 from .job_detail import fetch_job_detail
 from .job_safety import clean_job_text, evaluate_eligibility, extract_deadline, posting_status
 from .profile_config import load_candidate_profile
@@ -373,6 +374,10 @@ def validate_greetings(jobs: list[ReportJob], greetings: dict[str, str]) -> None
             raise ValueError(f"{item.job_id} 招呼语没有体现JD重点：{'、'.join(item.greeting_focus)}")
         if any(term.lower() in greeting.lower() for term in forbidden_claims):
             raise ValueError(f"{item.job_id} 招呼语包含未经证明的开发能力描述")
+        try:
+            validate_complete_greeting(greeting)
+        except ValueError as exc:
+            raise ValueError(f"{item.job_id} {exc}") from exc
         comparable = [previous for previous, group in validated if not item.duplicate_group or group != item.duplicate_group]
         if any(_greeting_similarity(greeting, previous) > 0.88 for previous in comparable):
             raise ValueError(f"{item.job_id} 招呼语与其他岗位过于相似")
@@ -395,6 +400,7 @@ def write_prepared_report(jobs: list[ReportJob], path: Path) -> None:
         f"将招呼语写入 {greeting_path.name}，格式为job_id到招呼语的JSON对象；将深度分析写入 {deep_path.name}，格式为job_id到分析对象。"
         "为候选岗位JSON中所有score>=70的岗位逐岗撰写中文招呼语。"
         "每段100—130字，依次体现：前20字身份和独立产出能力、2—4项技术能力、一项实际成果、JD契合点与沟通邀请。"
+        "结尾必须是完整的沟通或交流邀请句，严禁为了满足字数限制而截断词语或句子。"
         f"必须至少包含一项技术能力（{'、'.join(profile['tech_facts'])}）和一项具体产出（{'、'.join(profile['output_facts'])}），"
         "并原样提及该岗位greeting_focus中的至少一项。FDE突出从需求到上线及工具编排；解决方案突出流程拆解、技术边界与价值转化；"
         "AI产品突出场景抽象、能力规划和跨团队推进；转型咨询突出业务流程和实际成果。不同岗位必须体现JD差异，不能只替换公司名；"

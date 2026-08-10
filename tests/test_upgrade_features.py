@@ -11,7 +11,7 @@ from job_matcher.daily_report import _score, select_jobs
 from job_matcher.deep_analysis import apply_deep_analyses, require_complete_deep_analyses
 from job_matcher.job_safety import clean_job_text, evaluate_eligibility, extract_deadline, posting_status
 from job_matcher.skill_gaps import build_skill_observations, generate_skill_gap_report
-from job_matcher.web import health
+from job_matcher.web import _filter_recruiter_type, health
 
 class JobSafetyTests(unittest.TestCase):
     def test_cleans_untrusted_content_without_following_links(self):
@@ -69,6 +69,16 @@ class SelectionAndGapTests(unittest.TestCase):
 
 class TemplateSafetyTests(unittest.TestCase):
     def test_dashboard_health_contract(self): self.assertEqual(health(), {"ok": True, "service": "ai-job-matcher"})
+    def test_salary_profile_is_described_as_job_upper_bound(self):
+        env = Environment(loader=FileSystemLoader(Path(__file__).parents[1] / "templates"), autoescape=select_autoescape(["html"]))
+        rendered = env.get_template("daily_report.html").render(jobs=[], source_labels={}, source_health=[], report_dates=[], application_stats=None, excluded_count=0, latest_skill_gap_report=None, qualified=0, supplemental=0, address="深圳", report_date="2026-08-10", profile_complete=True, resume_name="resume.pdf", candidate_profile={"cities": ["深圳"], "target_roles": ["FDE"], "salary_upper_floor": 30000})
+        self.assertIn("岗位月薪上限门槛：至少30K", rendered); self.assertNotIn("最低薪资", rendered)
+    def test_dashboard_recruiter_filter_is_rendered_and_filters_jobs(self):
+        jobs = [{"job_id":"1","recruiter_type":"employer"},{"job_id":"2","recruiter_type":"headhunter"},{"job_id":"3","recruiter_type":"unknown"}]
+        self.assertEqual([x["job_id"] for x in _filter_recruiter_type(jobs,"headhunter")],["2"])
+        env = Environment(loader=FileSystemLoader(Path(__file__).parents[1] / "templates"), autoescape=select_autoescape(["html"]))
+        rendered = env.get_template("daily_report.html").render(jobs=[],source_labels={},source_health=[],report_dates=[{"report_date":"2026-08-10","qualified":0,"supplemental":0}],application_stats=None,excluded_count=0,latest_skill_gap_report=None,qualified=0,supplemental=0,address="深圳",report_date="2026-08-10",source_filter="all",recruiter_filter="headhunter",status_filter="all",freshness_filter="all")
+        self.assertIn('name="recruiter_type"',rendered); self.assertIn('value="headhunter" selected',rendered)
     def test_dashboard_escapes_text_and_renders_deep_review(self):
         env = Environment(loader=FileSystemLoader(Path(__file__).parents[1] / "templates"), autoescape=select_autoescape(["html"]))
         job = {"score": 80, "tier": "优先沟通", "job_id": "liepin:1", "source": "liepin", "fingerprint": "fp", "name": "FDE", "company": "<script>alert(1)</script>", "location": "深圳", "salary": "20-30K", "work_years": "3年", "education": "本科", "industry": "AI", "matched": [], "gaps": [], "verdict": "匹配", "greeting": None, "is_supplemental": False, "status": "pending", "detail": "安全JD", "url": "https://example.com", "duplicate_group": None, "is_excluded": False, "deadline": "2026-08-10", "posting_status": "closing_soon", "eligibility_verdict": "pass", "content_warnings": [], "deep_analysis": {"strengths": ["一", "二", "三"], "risks": ["风险"], "evidence": ["事实一", "事实二"], "recommendation": "建议优先投递"}}

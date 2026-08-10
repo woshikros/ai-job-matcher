@@ -1,11 +1,17 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from typing import Any
 
 from .candidate_profile import get_candidate_profile, profile_facts
 
 FORBIDDEN = ("熟练Python", "精通Python", "独立编写复杂生产代码", "资深软件工程师", "全栈开发专家")
+COMPLETE_INVITATION = re.compile(r"(?:期待|希望|欢迎).{0,18}(?:沟通|交流).{0,12}[。！!]$")
+
+def validate_complete_greeting(greeting: str) -> None:
+    if not COMPLETE_INVITATION.search(greeting.strip()):
+        raise ValueError("招呼语必须以完整的沟通邀请句收尾，不能截断句子")
 
 def _focus(job: dict[str, Any]) -> str:
     values = job.get("greeting_focus") or job.get("matched") or []
@@ -39,3 +45,4 @@ def _validate(text: str, facts: list[str], focus: str, headhunter: bool = False)
     if not any(str(fact).lower() in text.lower() for fact in facts): raise ValueError("招呼语缺少已确认事实")
     if focus not in text: raise ValueError("招呼语缺少岗位重点")
     if any(item.lower() in text.lower() for item in FORBIDDEN): raise ValueError("招呼语包含未经确认的能力")
+    validate_complete_greeting(text)

@@ -71,3 +71,11 @@ class GreetingValidationTests(unittest.TestCase):
         greeting = "AI解决方案顾问，可独立搭建企业级AI Agent方案。精通Python并熟悉Workflow、Skill、MCP和API接入，已完成示例业务工作流和示例Agent原型，覆盖需求分析、流程拆解、联调和交付推进。贵司强调方案设计，与我的项目实践高度契合，希望进一步沟通交流。"
         with self.assertRaises(ValueError):
             validate_greetings([job], {"liepin:1": greeting})
+
+    def test_rejects_length_compliant_but_truncated_greeting(self):
+        job = make_job(80, 1)
+        greeting = "AI解决方案顾问，独立推进企业AI Agent实践。贵司强调方案设计，我熟悉Codex、Claude Code、Workflow、Skill和API，已完成示例业务工作流及示例Agent原型并推动联调，覆盖需求拆解、产品规划和交付推进，也可将复杂流程沉。"
+        self.assertGreaterEqual(len(greeting), 100)
+        self.assertLessEqual(len(greeting), 130)
+        with self.assertRaisesRegex(ValueError, "不能截断句子"):
+            validate_greetings([job], {"liepin:1": greeting})
