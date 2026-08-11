@@ -9,7 +9,6 @@ from jinja2 import Environment, FileSystemLoader, select_autoescape
 import job_matcher.storage as storage
 from job_matcher.branding import get_source_logos
 from job_matcher.daily_report import _score, select_jobs
-from job_matcher.deep_analysis import apply_deep_analyses, require_complete_deep_analyses
 from job_matcher.job_safety import clean_job_text, evaluate_eligibility, extract_deadline, posting_status
 from job_matcher.skill_gaps import build_skill_observations, generate_skill_gap_report
 from job_matcher.web import _filter_recruiter_type, health
@@ -27,22 +26,6 @@ class JobSafetyTests(unittest.TestCase):
         failed = evaluate_eligibility("本科学历，方案交付", {"education": "硕士"}, "硕士及以上学历", "active")
         flagged = evaluate_eligibility("本科学历，方案交付", {"location": "深圳"}, "要求商务英语流利并长期驻场", "active")
         self.assertEqual(failed.verdict, "fail"); self.assertEqual(flagged.verdict, "flag")
-
-class DeepAnalysisTests(unittest.TestCase):
-    def _job(self, score=80, verdict="pass", job_id="liepin:1"): return SimpleNamespace(job_id=job_id, score=score, eligibility_verdict=verdict, deep_analysis=None, deep_analysis_error="")
-    def test_only_eligible_75_plus_jobs_receive_analysis(self):
-        high, low, failed = self._job(), self._job(74, job_id="liepin:2"), self._job(90, "fail", "liepin:3")
-        raw = {"liepin:1": {"strengths": ["匹配需求分析", "匹配方案设计", "匹配交付推进"], "risks": ["编码深度需确认"], "evidence": ["熟悉Workflow", "具备需求分析经验"], "recommendation": "建议优先投递，并重点展示从需求到交付的完整实践。"}}
-        self.assertFalse(apply_deep_analyses([high, low, failed], raw, ["Workflow", "需求分析"], ["精通Python"])); self.assertIsNotNone(high.deep_analysis); self.assertIsNone(low.deep_analysis); self.assertIsNone(failed.deep_analysis)
-    def test_invalid_claim_degrades_without_changing_score(self):
-        job = self._job(); before = job.score
-        raw = {"liepin:1": {"strengths": ["一", "二", "三"], "risks": ["风险"], "evidence": ["精通Python", "Workflow"], "recommendation": "建议优先投递并补充相关项目事实后再进行沟通。"}}
-        self.assertTrue(apply_deep_analyses([job], raw, ["Workflow"], ["精通Python"])); self.assertIsNone(job.deep_analysis); self.assertEqual(job.score, before)
-    def test_final_report_requires_every_eligible_analysis(self):
-        job = self._job(); apply_deep_analyses([job], {}, ["Workflow"], ["精通Python"])
-        with self.assertRaisesRegex(ValueError, "投递策略未完成"): require_complete_deep_analyses([job])
-        raw = {"liepin:1": {"strengths": ["匹配需求分析", "匹配方案设计", "匹配交付推进"], "risks": ["编码深度需确认"], "evidence": ["熟悉Workflow", "具备需求分析经验"], "recommendation": "建议优先投递，并重点展示从需求到交付的完整实践。"}}
-        apply_deep_analyses([job], raw, ["Workflow", "需求分析"], ["精通Python"]); require_complete_deep_analyses([job])
 
 class SelectionAndGapTests(unittest.TestCase):
     def test_embedded_architect_is_excluded_from_ai_targets(self):
@@ -85,7 +68,7 @@ class TemplateSafetyTests(unittest.TestCase):
         job = {"score": 80, "tier": "优先沟通", "job_id": "liepin:1", "source": "liepin", "fingerprint": "fp", "name": "FDE", "company": "<script>alert(1)</script>", "location": "深圳", "salary": "20-30K", "work_years": "3年", "education": "本科", "industry": "AI", "matched": [], "gaps": [], "verdict": "匹配", "greeting": None, "is_supplemental": False, "status": "pending", "detail": "安全JD", "url": "https://example.com", "duplicate_group": None, "is_excluded": False, "deadline": "2026-08-10", "posting_status": "closing_soon", "eligibility_verdict": "pass", "content_warnings": [], "deep_analysis": {"strengths": ["一", "二", "三"], "risks": ["风险"], "evidence": ["事实一", "事实二"], "recommendation": "建议优先投递"}}
         logos = get_source_logos(); self.assertEqual(set(logos), {"liepin", "zhilian"}); self.assertTrue(all(value.startswith("data:image/") for value in logos.values()))
         rendered = env.get_template("daily_report.html").render(jobs=[job], source_labels={"liepin": "猎聘"}, source_logos=logos, source_health=[], report_dates=[], application_stats=None, excluded_count=0, latest_skill_gap_report=None, qualified=1, supplemental=0, address="深圳", report_date="2026-08-06")
-        self.assertIn("展开投递策略", rendered); self.assertNotIn("<script>alert(1)</script>", rendered); self.assertIn("&lt;script&gt;", rendered)
+        self.assertNotIn("展开投递策略", rendered); self.assertNotIn("投递策略未完成", rendered); self.assertNotIn("<script>alert(1)</script>", rendered); self.assertIn("&lt;script&gt;", rendered)
         self.assertIn('data-source-logo="liepin"', rendered); self.assertIn('src="data:image/x-icon;base64,', rendered)
         fallback = env.get_template("daily_report.html").render(jobs=[job], source_labels={"liepin": "猎聘"}, source_logos={}, source_health=[], report_dates=[], application_stats=None, excluded_count=0, latest_skill_gap_report=None, qualified=1, supplemental=0, address="深圳", report_date="2026-08-06")
         self.assertIn('<span class="source-fallback">猎聘</span>', fallback)

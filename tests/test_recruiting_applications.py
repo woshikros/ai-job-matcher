@@ -26,9 +26,16 @@ class ApplicationTests(unittest.TestCase):
         first=""
         for n in range(50):
             job_id=self.add(n); first=first or job_id
-            if n<10: storage.update_application_record(job_id,feedback_status="replied")
+            if n<10: storage.update_application_record(job_id,feedback_outcome="communicating")
         self.assertEqual(storage.search_application_records("公司0")[0]["greeting_text"],"话术0")
-        review=storage.get_application_review(as_of=date(2026,7,10)); self.assertTrue(review["available"]); self.assertEqual(review["overall"]["reply_rate"],20)
+        review=storage.get_application_review(as_of=date(2026,7,10)); self.assertTrue(review["available"]); self.assertEqual(review["overall"]["progress_rate"],100)
         storage.set_job_status(first,"fp-0","pending","liepin"); self.assertEqual(len(storage.search_application_records()),49)
+    def test_detailed_feedback_and_pending_queue(self):
+        job_id=self.add(1)
+        with self.assertRaisesRegex(ValueError,"至少选择一个原因"): storage.update_application_record(job_id,feedback_outcome="rejected")
+        storage.update_application_record(job_id,feedback_outcome="rejected",rejection_reasons=["行业经验"],feedback_note="行业背景不匹配")
+        row=storage.search_application_records(rejection_reason="行业经验")[0]
+        self.assertEqual(row["feedback_note"],"行业背景不匹配")
+        self.assertEqual(storage.get_pending_feedback(as_of=date(2026,7,10))["total"],0)
 
 if __name__=="__main__": unittest.main()

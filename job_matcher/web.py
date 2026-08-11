@@ -22,9 +22,9 @@ from .scoring import job_text, score_job
 from .salary import DEFAULT_SALARY_UPPER_FLOOR, SALARY_OPTIONS, normalise_salary_floor
 from .skill_gaps import generate_skill_gap_report
 from .storage import (
-    DATA_DIR, delete_manual_greeting, find_report_job, get_application_review, get_application_statistics,
+    DATA_DIR, FEEDBACK_OUTCOMES, REJECTION_REASONS, delete_manual_greeting, find_report_job, get_application_review, get_application_statistics,
     get_manual_greeting, get_report_summary, get_setting, get_source_health, initialize, list_report_dates,
-    list_skill_gap_report_dates, load_daily_report, load_skill_gap_report, save_manual_greeting, save_search,
+    get_pending_feedback, list_skill_gap_report_dates, load_daily_report, load_skill_gap_report, save_manual_greeting, save_search,
     save_setting, search_application_records, set_job_status, set_recruiter_override, update_application_record,
 )
 
@@ -97,6 +97,8 @@ def dashboard(
             "freshness_filter": freshness, "source_health": source_health,
             "application_stats": get_application_statistics(),
             "application_review": get_application_review(),
+            "pending_feedback": get_pending_feedback(8), "feedback_outcomes": FEEDBACK_OUTCOMES,
+            "rejection_reasons": REJECTION_REASONS,
             "source_labels": {"liepin": "猎聘", "zhilian": "智联招聘"},
             "source_logos": get_source_logos(),
             "latest_skill_gap_report": load_skill_gap_report(),
@@ -157,6 +159,9 @@ class RecruiterUpdate(BaseModel):
 
 class ApplicationUpdate(BaseModel):
     feedback_status: str | None = None
+    feedback_outcome: str | None = None
+    rejection_reasons: list[str] | None = None
+    feedback_note: str | None = None
     note: str | None = None
     greeting_text: str | None = None
     recruiter_type: str | None = None
@@ -194,21 +199,21 @@ def create_low_score_greeting(job_id: str, payload: GreetingRequest):
     return {"ok":True,**saved}
 
 @app.get("/applications",response_class=HTMLResponse)
-def applications(request: Request,q: str="",source: str="all",recruiter_type: str="all",feedback: str="all",role: str="all",date_from: str="",date_to: str=""):
-    rows=search_application_records(q,source,recruiter_type,feedback,role,date_from,date_to); role_options=sorted({str(item["role_family"]) for item in search_application_records()})
-    return templates.TemplateResponse(request,"applications.html",{"records":rows,"q":q,"source_filter":source,"recruiter_filter":recruiter_type,"feedback_filter":feedback,"role_filter":role,"date_from":date_from,"date_to":date_to,"role_options":role_options,"statistics":get_application_statistics(),"source_labels":{"liepin":"猎聘","zhilian":"智联招聘"},"source_logos":get_source_logos()})
+def applications(request: Request,q: str="",source: str="all",recruiter_type: str="all",feedback: str="all",rejection_reason: str="all",role: str="all",date_from: str="",date_to: str="",sort: str="newest"):
+    rows=search_application_records(q,source,recruiter_type,feedback,role,date_from,date_to,rejection_reason,sort); role_options=sorted({str(item["role_family"]) for item in search_application_records()})
+    return templates.TemplateResponse(request,"applications.html",{"records":rows,"q":q,"source_filter":source,"recruiter_filter":recruiter_type,"feedback_filter":feedback,"rejection_reason_filter":rejection_reason,"role_filter":role,"date_from":date_from,"date_to":date_to,"sort_filter":sort,"role_options":role_options,"statistics":get_application_statistics(),"pending_feedback":get_pending_feedback(8),"feedback_outcomes":FEEDBACK_OUTCOMES,"rejection_reasons":REJECTION_REASONS,"source_labels":{"liepin":"猎聘","zhilian":"智联招聘"},"source_logos":get_source_logos()})
 
 @app.post("/api/applications/{job_id}")
 def update_application(job_id: str,payload: ApplicationUpdate):
-    try: record=update_application_record(job_id,feedback_status=payload.feedback_status,note=payload.note,greeting_text=payload.greeting_text,recruiter_type=payload.recruiter_type)
+    try: record=update_application_record(job_id,feedback_status=payload.feedback_status,feedback_outcome=payload.feedback_outcome,rejection_reasons=payload.rejection_reasons,feedback_note=payload.feedback_note,note=payload.note,greeting_text=payload.greeting_text,recruiter_type=payload.recruiter_type)
     except ValueError as exc: return JSONResponse({"error":str(exc)},status_code=400)
     if not record: return JSONResponse({"error":"没有找到该投递记录"},status_code=404)
     if payload.recruiter_type: set_recruiter_override(str(record["fingerprint"]),payload.recruiter_type)
-    return {"ok":True,"record":record}
+    return {"ok":True,"record":record,"statistics":get_application_statistics(),"pending_feedback":get_pending_feedback(8),"review":get_application_review()}
 
 @app.get("/application-review",response_class=HTMLResponse)
 def application_review(request: Request):
-    return templates.TemplateResponse(request,"application_review.html",{"review":get_application_review()})
+    return templates.TemplateResponse(request,"application_review.html",{"review":get_application_review(),"feedback_outcomes":FEEDBACK_OUTCOMES})
 
 
 @app.get("/api/statistics/applications")

@@ -21,7 +21,7 @@ def rescore_saved_report(report_date: str | None = None) -> dict[str, Any]:
         current = _score(raw, str(old.get("detail") or ""), resume_text, date.fromisoformat(selected_date), profile)
         current.duplicate_group = old.get("duplicate_group"); current.duplicate_sources = list(old.get("duplicate_sources") or [])
         current.greeting = old.get("greeting") if current.score >= 70 and not current.is_excluded else None
-        current.deep_analysis = None; current.deep_analysis_error = "评分已更新，深度分析将在下一次日报重新生成" if current.score >= 75 and not current.is_excluded else ""
+        current.deep_analysis = None; current.deep_analysis_error = ""
         scored.append(current)
     jobs = select_jobs(mark_cross_platform_duplicates(scored)); payload = [asdict(item) for item in jobs]; summary = get_report_summary(selected_date)
     save_daily_report(selected_date, "", payload, list(summary.get("source_health", [])))

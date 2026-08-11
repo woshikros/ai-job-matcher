@@ -32,7 +32,7 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "Candidate preparation failed." }
     Write-Output "Candidates: $candidateOutput"
     Write-Output "Prompt: $([IO.Path]::ChangeExtension($candidateOutput, '.prompt.md'))"
-    Write-Output "Next: let Codex create greetings and deep-analysis JSON, then run the final render command documented in README.md."
+    Write-Output "Next: create the greetings JSON, then run the final render command documented in README.md."
 } finally {
     Pop-Location
 }

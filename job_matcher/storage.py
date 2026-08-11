@@ -11,6 +11,9 @@ from .recruiting import RECRUITER_TYPES, classify_recruiter, role_family
 
 DATA_DIR = Path("data")
 DB_PATH = DATA_DIR / "matcher.db"
+FEEDBACK_OUTCOMES={"unknown":"未更新","read_no_reply":"已读未回","resume_requested_stalled":"索要简历后无回复","communicating":"沟通中","rejected":"明确不合适","interview":"面试邀约"}
+REJECTION_REASONS=("原因未说明","年龄或资历","学历或学校","工作稳定性","行业经验","技术栈或开发深度","项目或交付经验","管理经验或职级","薪资","地点、出差或驻场","岗位方向","其他")
+LEGACY_FEEDBACK={"unknown":"unknown","read_no_reply":"read_no_reply","resume_requested_stalled":"replied","communicating":"replied","rejected":"replied","interview":"interview"}
 
 
 def initialize() -> None:
@@ -117,6 +120,7 @@ def initialize() -> None:
         connection.execute("CREATE INDEX IF NOT EXISTS idx_applications_search ON application_records(company,job_name,recruiter_name)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_applications_applied_at ON application_records(applied_at)")
         _migrate_platform_columns(connection)
+        _migrate_application_feedback(connection)
         _backfill_job_sightings(connection)
         _backfill_skill_observations(connection)
         _backfill_application_records(connection)
@@ -124,6 +128,13 @@ def initialize() -> None:
 
 def _columns(connection: sqlite3.Connection, table: str) -> set[str]:
     return {str(row[1]) for row in connection.execute(f"PRAGMA table_info({table})")}
+
+def _migrate_application_feedback(connection: sqlite3.Connection) -> None:
+    columns=_columns(connection,"application_records")
+    for name,definition in {"feedback_outcome":"TEXT NOT NULL DEFAULT 'unknown'","rejection_reasons":"TEXT NOT NULL DEFAULT '[]'","feedback_note":"TEXT NOT NULL DEFAULT ''","feedback_updated_at":"TEXT"}.items():
+        if name not in columns: connection.execute(f"ALTER TABLE application_records ADD COLUMN {name} {definition}")
+    connection.execute("""UPDATE application_records SET feedback_outcome=CASE feedback_status WHEN 'read_no_reply' THEN 'read_no_reply' WHEN 'replied' THEN 'communicating' WHEN 'interview' THEN 'interview' ELSE 'unknown' END WHERE feedback_outcome='unknown' AND feedback_status!='unknown'""")
+    connection.execute("CREATE INDEX IF NOT EXISTS idx_applications_feedback ON application_records(feedback_outcome,applied_at)")
 
 
 def _migrate_platform_columns(connection: sqlite3.Connection) -> None:
@@ -203,7 +214,7 @@ def _write_application_record(connection: sqlite3.Connection, job_id: str, sourc
         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'unknown','',1,?) ON CONFLICT(job_id) DO UPDATE SET source=excluded.source,fingerprint=excluded.fingerprint,
         company=excluded.company,job_name=excluded.job_name,role_family=excluded.role_family,recruiter_type=excluded.recruiter_type,
         recruiter_name=excluded.recruiter_name,greeting_text=excluded.greeting_text,greeting_strategy=excluded.greeting_strategy,
-        job_url=excluded.job_url,score=excluded.score,applied_at=excluded.applied_at,feedback_status='unknown',note='',active=1,updated_at=excluded.updated_at""",
+        job_url=excluded.job_url,score=excluded.score,applied_at=excluded.applied_at,feedback_status='unknown',feedback_outcome='unknown',rejection_reasons='[]',feedback_note='',feedback_updated_at=NULL,note='',active=1,updated_at=excluded.updated_at""",
         (snapshot["job_id"],snapshot["source"],snapshot["fingerprint"],snapshot["company"],snapshot["job_name"],snapshot["role_family"],snapshot["recruiter_type"],snapshot["recruiter_name"],snapshot["greeting_text"],snapshot["greeting_strategy"],snapshot["job_url"],snapshot["score"],applied_at,now))
 
 def _backfill_application_records(connection: sqlite3.Connection) -> None:
@@ -310,43 +321,69 @@ def get_recruiter_overrides(fingerprints: list[str]) -> dict[str,str]:
         rows = connection.execute(f"SELECT fingerprint,recruiter_type FROM recruiter_overrides WHERE fingerprint IN ({placeholders})", fingerprints).fetchall()
     return {str(row[0]):str(row[1]) for row in rows}
 
-def search_application_records(query: str = "", source: str = "all", recruiter_type: str = "all", feedback_status: str = "all", role: str = "all", date_from: str = "", date_to: str = "") -> list[dict[str,Any]]:
+def search_application_records(query: str = "", source: str = "all", recruiter_type: str = "all", feedback_status: str = "all", role: str = "all", date_from: str = "", date_to: str = "", rejection_reason: str="all", sort: str="newest") -> list[dict[str,Any]]:
     initialize(); clauses=["active=1"]; values:list[Any]=[]
-    if query.strip(): clauses.append("(company LIKE ? OR job_name LIKE ? OR recruiter_name LIKE ? OR greeting_text LIKE ? OR note LIKE ?)"); token=f"%{query.strip()}%"; values.extend([token]*5)
+    if query.strip(): clauses.append("(company LIKE ? OR job_name LIKE ? OR role_family LIKE ? OR recruiter_name LIKE ? OR greeting_text LIKE ? OR feedback_note LIKE ? OR note LIKE ?)"); token=f"%{query.strip()}%"; values.extend([token]*7)
     if source != "all": clauses.append("source=?"); values.append(source)
     if recruiter_type != "all": clauses.append("recruiter_type=?"); values.append(recruiter_type)
-    if feedback_status != "all": clauses.append("feedback_status=?"); values.append(feedback_status)
+    if feedback_status != "all": clauses.append("feedback_outcome=?"); values.append(feedback_status)
     if role != "all": clauses.append("role_family=?"); values.append(role)
     if date_from: clauses.append("substr(applied_at,1,10)>=?"); values.append(date_from)
     if date_to: clauses.append("substr(applied_at,1,10)<=?"); values.append(date_to)
+    if rejection_reason!="all": clauses.append("rejection_reasons LIKE ?"); values.append(f'%"{rejection_reason}"%')
+    order_by={"newest":"applied_at DESC","oldest":"applied_at ASC","pending":"CASE WHEN feedback_outcome='unknown' AND date(applied_at)<=date('now','-3 day') THEN 0 ELSE 1 END, applied_at ASC"}.get(sort,"applied_at DESC")
     with closing(sqlite3.connect(DB_PATH)) as connection:
-        connection.row_factory=sqlite3.Row; rows=connection.execute(f"SELECT * FROM application_records WHERE {' AND '.join(clauses)} ORDER BY applied_at DESC",values).fetchall()
-    return [dict(row) for row in rows]
+        connection.row_factory=sqlite3.Row; rows=connection.execute(f"SELECT * FROM application_records WHERE {' AND '.join(clauses)} ORDER BY {order_by}",values).fetchall()
+    result=[]
+    for row in rows:
+        item=dict(row)
+        try: item["rejection_reasons"]=json.loads(item.get("rejection_reasons") or "[]")
+        except (json.JSONDecodeError,TypeError): item["rejection_reasons"]=[]
+        result.append(item)
+    return result
 
-def update_application_record(job_id: str, *, feedback_status: str|None=None, note: str|None=None, greeting_text: str|None=None, recruiter_type: str|None=None) -> dict[str,Any]|None:
-    if feedback_status is not None and feedback_status not in {"unknown","read_no_reply","replied","interview"}: raise ValueError("无效反馈状态")
+def update_application_record(job_id: str, *, feedback_status: str|None=None, note: str|None=None, greeting_text: str|None=None, recruiter_type: str|None=None, feedback_outcome: str|None=None, rejection_reasons: list[str]|None=None, feedback_note: str|None=None) -> dict[str,Any]|None:
+    if feedback_outcome is None and feedback_status is not None: feedback_outcome={"unknown":"unknown","read_no_reply":"read_no_reply","replied":"communicating","interview":"interview"}.get(feedback_status)
+    if feedback_outcome is not None and feedback_outcome not in FEEDBACK_OUTCOMES: raise ValueError("无效反馈结果")
+    clean_reasons=list(dict.fromkeys(str(x).strip() for x in (rejection_reasons or []) if str(x).strip()))
+    if any(x not in REJECTION_REASONS for x in clean_reasons): raise ValueError("无效的不合适原因")
+    if feedback_outcome=="rejected" and not clean_reasons: raise ValueError("选择明确不合适时，请至少选择一个原因")
+    if feedback_outcome is not None and feedback_outcome!="rejected": clean_reasons=[]
     if recruiter_type is not None and recruiter_type not in RECRUITER_TYPES: raise ValueError("无效招聘者类型")
-    initialize(); assignments=["updated_at=?"]; values:list[Any]=[datetime.now().isoformat(timespec="seconds")]
-    for column,value in (("feedback_status",feedback_status),("note",note),("greeting_text",greeting_text),("recruiter_type",recruiter_type)):
-        if value is not None: assignments.append(f"{column}=?"); values.append(str(value)[:1000] if column in {"note","greeting_text"} else value)
+    initialize(); now=datetime.now().isoformat(timespec="seconds"); assignments=["updated_at=?"]; values:list[Any]=[now]
+    if feedback_outcome is not None: assignments.extend(["feedback_outcome=?","feedback_status=?","rejection_reasons=?","feedback_updated_at=?"]); values.extend([feedback_outcome,LEGACY_FEEDBACK[feedback_outcome],json.dumps(clean_reasons,ensure_ascii=False),now])
+    for column,value in (("note",note),("feedback_note",feedback_note),("greeting_text",greeting_text),("recruiter_type",recruiter_type)):
+        if value is not None: assignments.append(f"{column}=?"); values.append(str(value)[:2000] if column in {"note","feedback_note","greeting_text"} else value)
     values.append(job_id)
     with closing(sqlite3.connect(DB_PATH)) as connection, connection:
         connection.execute(f"UPDATE application_records SET {','.join(assignments)} WHERE job_id=? AND active=1",values); connection.row_factory=sqlite3.Row
         row=connection.execute("SELECT * FROM application_records WHERE job_id=? AND active=1",(job_id,)).fetchone()
-    return dict(row) if row else None
+    if not row: return None
+    result=dict(row); result["rejection_reasons"]=json.loads(result.get("rejection_reasons") or "[]"); return result
 
-def get_application_review(as_of: date|None=None, minimum_group: int=5) -> dict[str,Any]:
-    reference=as_of or date.today(); mature_before=(reference-timedelta(days=3)).isoformat(); rows=search_application_records(); mature=[row for row in rows if str(row["applied_at"])[:10]<=mature_before]
-    labels={"source":{"liepin":"猎聘","zhilian":"智联招聘","zhipin":"Boss直聘"},"recruiter_type":{"employer":"企业招聘方","headhunter":"猎头","unknown":"待确认"},"greeting_strategy":{"direct_custom":"定制话术","headhunter_metrics":"猎头硬指标话术","not_recorded":"话术未记录"}}
+def get_pending_feedback(limit: int=8, as_of: date|None=None) -> dict[str,Any]:
+    cutoff=((as_of or date.today())-timedelta(days=3)).isoformat(); initialize()
+    with closing(sqlite3.connect(DB_PATH)) as connection:
+        connection.row_factory=sqlite3.Row; total=int(connection.execute("SELECT COUNT(*) FROM application_records WHERE active=1 AND feedback_outcome='unknown' AND substr(applied_at,1,10)<=?",(cutoff,)).fetchone()[0]); rows=connection.execute("SELECT * FROM application_records WHERE active=1 AND feedback_outcome='unknown' AND substr(applied_at,1,10)<=? ORDER BY applied_at ASC LIMIT ?",(cutoff,max(0,int(limit)))).fetchall()
+    return {"total":total,"cutoff":cutoff,"records":[dict(row) for row in rows]}
+
+def get_application_review(as_of: date|None=None, minimum_group: int=5, minimum_advice: int=20) -> dict[str,Any]:
+    reference=as_of or date.today(); mature_before=(reference-timedelta(days=3)).isoformat(); rows=search_application_records(); mature=[row for row in rows if str(row["applied_at"])[:10]<=mature_before]; known=[row for row in mature if row["feedback_outcome"]!="unknown"]
+    labels={"source":{"liepin":"猎聘","zhilian":"智联招聘"},"recruiter_type":{"employer":"企业招聘方","headhunter":"猎头","unknown":"待确认"},"greeting_strategy":{"direct_custom":"定制话术","headhunter_metrics":"猎头硬指标话术","not_recorded":"话术未记录"}}
     def metrics(items):
-        total=len(items); read=sum(row["feedback_status"]!="unknown" for row in items); replied=sum(row["feedback_status"] in {"replied","interview"} for row in items); interview=sum(row["feedback_status"]=="interview" for row in items)
-        return {"total":total,"read":read,"replied":replied,"interview":interview,"unknown":total-read,"read_rate":round(read*100/total) if total else 0,"reply_rate":round(replied*100/total) if total else 0,"interview_rate":round(interview*100/total) if total else 0,"enough_sample":total>=minimum_group}
+        total=len(items); updated=[row for row in items if row["feedback_outcome"]!="unknown"]; denominator=len(updated); response=sum(row["feedback_outcome"] in {"resume_requested_stalled","communicating","rejected","interview"} for row in updated); progressed=sum(row["feedback_outcome"] in {"communicating","interview"} for row in updated); rejected=sum(row["feedback_outcome"]=="rejected" for row in updated); interview=sum(row["feedback_outcome"]=="interview" for row in updated); rate=lambda x:round(x*100/denominator) if denominator else 0
+        return {"total":total,"updated":denominator,"unknown":total-denominator,"response":response,"progressed":progressed,"rejected":rejected,"interview":interview,"response_rate":rate(response),"progress_rate":rate(progressed),"rejection_rate":rate(rejected),"interview_rate":rate(interview),"enough_sample":denominator>=minimum_group}
     groups={}
     for field in ("role_family","source","recruiter_type","greeting_strategy"):
         buckets={}
         for row in mature: buckets.setdefault(str(row[field]),[]).append(row)
         groups[field]=[{"key":key,"label":labels.get(field,{}).get(key,key),**metrics(items)} for key,items in sorted(buckets.items(),key=lambda pair:len(pair[1]),reverse=True)]
-    return {"available":len(rows)>=50,"total":len(rows),"observing":len(rows)-len(mature),"mature_total":len(mature),"overall":metrics(mature),"groups":groups,"minimum_group":minimum_group,"as_of":reference.isoformat()}
+    counts={}
+    for row in known:
+        if row["feedback_outcome"]=="rejected":
+            for reason in row.get("rejection_reasons",[]): counts[reason]=counts.get(reason,0)+1
+    reasons=[{"reason":reason,"count":count} for reason,count in sorted(counts.items(),key=lambda x:(-x[1],x[0]))]
+    return {"available":len(rows)>=50,"advice_ready":len(known)>=minimum_advice,"total":len(rows),"observing":len(rows)-len(mature),"mature_total":len(mature),"updated_mature":len(known),"overall":metrics(mature),"groups":groups,"rejection_reasons":reasons,"minimum_group":minimum_group,"minimum_advice":minimum_advice,"as_of":reference.isoformat()}
 
 
 def get_manual_greeting(job_id: str, fingerprint: str) -> dict[str,Any]|None:
