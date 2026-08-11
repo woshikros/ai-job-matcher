@@ -97,8 +97,6 @@ def dashboard(
             "freshness_filter": freshness, "source_health": source_health,
             "application_stats": get_application_statistics(),
             "application_review": get_application_review(),
-            "pending_feedback": get_pending_feedback(8), "feedback_outcomes": FEEDBACK_OUTCOMES,
-            "rejection_reasons": REJECTION_REASONS,
             "source_labels": {"liepin": "猎聘", "zhilian": "智联招聘"},
             "source_logos": get_source_logos(),
             "latest_skill_gap_report": load_skill_gap_report(),
