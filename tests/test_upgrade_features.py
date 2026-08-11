@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 import job_matcher.storage as storage
+from job_matcher.branding import get_source_logos
 from job_matcher.daily_report import _score, select_jobs
 from job_matcher.deep_analysis import apply_deep_analyses, require_complete_deep_analyses
 from job_matcher.job_safety import clean_job_text, evaluate_eligibility, extract_deadline, posting_status
@@ -82,5 +83,9 @@ class TemplateSafetyTests(unittest.TestCase):
     def test_dashboard_escapes_text_and_renders_deep_review(self):
         env = Environment(loader=FileSystemLoader(Path(__file__).parents[1] / "templates"), autoescape=select_autoescape(["html"]))
         job = {"score": 80, "tier": "优先沟通", "job_id": "liepin:1", "source": "liepin", "fingerprint": "fp", "name": "FDE", "company": "<script>alert(1)</script>", "location": "深圳", "salary": "20-30K", "work_years": "3年", "education": "本科", "industry": "AI", "matched": [], "gaps": [], "verdict": "匹配", "greeting": None, "is_supplemental": False, "status": "pending", "detail": "安全JD", "url": "https://example.com", "duplicate_group": None, "is_excluded": False, "deadline": "2026-08-10", "posting_status": "closing_soon", "eligibility_verdict": "pass", "content_warnings": [], "deep_analysis": {"strengths": ["一", "二", "三"], "risks": ["风险"], "evidence": ["事实一", "事实二"], "recommendation": "建议优先投递"}}
-        rendered = env.get_template("daily_report.html").render(jobs=[job], source_labels={"liepin": "猎聘"}, source_health=[], report_dates=[], application_stats=None, excluded_count=0, latest_skill_gap_report=None, qualified=1, supplemental=0, address="深圳", report_date="2026-08-06")
+        logos = get_source_logos(); self.assertEqual(set(logos), {"liepin", "zhilian"}); self.assertTrue(all(value.startswith("data:image/") for value in logos.values()))
+        rendered = env.get_template("daily_report.html").render(jobs=[job], source_labels={"liepin": "猎聘"}, source_logos=logos, source_health=[], report_dates=[], application_stats=None, excluded_count=0, latest_skill_gap_report=None, qualified=1, supplemental=0, address="深圳", report_date="2026-08-06")
         self.assertIn("展开投递策略", rendered); self.assertNotIn("<script>alert(1)</script>", rendered); self.assertIn("&lt;script&gt;", rendered)
+        self.assertIn('data-source-logo="liepin"', rendered); self.assertIn('src="data:image/x-icon;base64,', rendered)
+        fallback = env.get_template("daily_report.html").render(jobs=[job], source_labels={"liepin": "猎聘"}, source_logos={}, source_health=[], report_dates=[], application_stats=None, excluded_count=0, latest_skill_gap_report=None, qualified=1, supplemental=0, address="深圳", report_date="2026-08-06")
+        self.assertIn('<span class="source-fallback">猎聘</span>', fallback)

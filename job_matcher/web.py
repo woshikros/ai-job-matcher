@@ -11,6 +11,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
+from .branding import get_source_logos
 from .candidate_profile import ROLE_OPTIONS, extract_profile_suggestions, get_candidate_profile, profile_is_complete, save_candidate_profile
 from .cli_client import LiepinCliError, search_jobs
 from .backup import export_backup, parse_backup, restore_backup
@@ -97,6 +98,7 @@ def dashboard(
             "application_stats": get_application_statistics(),
             "application_review": get_application_review(),
             "source_labels": {"liepin": "猎聘", "zhilian": "智联招聘"},
+            "source_logos": get_source_logos(),
             "latest_skill_gap_report": load_skill_gap_report(),
             "candidate_profile": profile, "profile_complete": profile_complete,
             "resume_name": get_setting("resume_name", "未上传"),
@@ -194,7 +196,7 @@ def create_low_score_greeting(job_id: str, payload: GreetingRequest):
 @app.get("/applications",response_class=HTMLResponse)
 def applications(request: Request,q: str="",source: str="all",recruiter_type: str="all",feedback: str="all",role: str="all",date_from: str="",date_to: str=""):
     rows=search_application_records(q,source,recruiter_type,feedback,role,date_from,date_to); role_options=sorted({str(item["role_family"]) for item in search_application_records()})
-    return templates.TemplateResponse(request,"applications.html",{"records":rows,"q":q,"source_filter":source,"recruiter_filter":recruiter_type,"feedback_filter":feedback,"role_filter":role,"date_from":date_from,"date_to":date_to,"role_options":role_options,"statistics":get_application_statistics()})
+    return templates.TemplateResponse(request,"applications.html",{"records":rows,"q":q,"source_filter":source,"recruiter_filter":recruiter_type,"feedback_filter":feedback,"role_filter":role,"date_from":date_from,"date_to":date_to,"role_options":role_options,"statistics":get_application_statistics(),"source_labels":{"liepin":"猎聘","zhilian":"智联招聘"},"source_logos":get_source_logos()})
 
 @app.post("/api/applications/{job_id}")
 def update_application(job_id: str,payload: ApplicationUpdate):

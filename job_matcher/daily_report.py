@@ -13,6 +13,7 @@ from typing import Any
 
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
+from .branding import get_source_logos
 from .candidate_profile import get_candidate_profile, profile_facts, profile_is_complete, profile_queries
 from .cli_client import search_jobs
 from .deep_analysis import apply_deep_analyses
@@ -465,6 +466,7 @@ def render_report(
             supplemental=sum(item.is_supplemental and not item.is_excluded for item in jobs),
             excluded_count=sum(item.is_excluded for item in jobs), deep_analysis_errors=deep_errors,
             source_health=source_health, source_filter="all", source_labels=source_labels,
+            source_logos=get_source_logos(),
             application_stats=get_application_statistics(),
             candidate_profile=candidate, resume_name=get_setting("resume_name", "未上传"),
             profile_complete=profile_is_complete(candidate),

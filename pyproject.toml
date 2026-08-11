@@ -18,5 +18,8 @@ dev = ["pytest>=8,<9"]
 [tool.setuptools]
 packages = ["job_matcher"]
 
+[tool.setuptools.package-data]
+job_matcher = ["assets/platforms/*"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
