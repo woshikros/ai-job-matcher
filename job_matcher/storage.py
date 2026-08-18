@@ -435,11 +435,11 @@ def save_daily_report(report_date: str, html_path: str, jobs: list[dict[str, Any
     generated_at = datetime.now().isoformat(timespec="seconds")
     summary = {
         "count": len(jobs),
-        "qualified": sum(1 for item in jobs if int(item.get("score", 0)) >= 70 and not item.get("is_excluded")),
+        "qualified": sum(1 for item in jobs if int(item.get("score", 0)) >= int(item.get("priority_threshold") or (82 if item.get("score_version") == "v3" else 70)) and not item.get("is_excluded")),
         "supplemental": sum(1 for item in jobs if bool(item.get("is_supplemental")) and not item.get("is_excluded")),
         "excluded": sum(1 for item in jobs if bool(item.get("is_excluded"))),
         "source_health": source_health or [],
-        "score_version": "v2" if jobs and all(item.get("score_version") == "v2" for item in jobs) else "mixed",
+        "score_version": jobs[0].get("score_version", "v2") if jobs and all(item.get("score_version") == jobs[0].get("score_version") for item in jobs) else "mixed",
     }
     with closing(sqlite3.connect(DB_PATH)) as connection, connection:
         connection.execute("PRAGMA foreign_keys=ON")

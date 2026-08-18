@@ -20,8 +20,11 @@ _OUTSOURCING_PATTERNS = (
     (re.compile(r"(?:供应商编制|供应商用工|项目制外包用工|非甲方编制)"), "岗位明确属于供应商或外包编制"),
 )
 
-def detect_outsourcing(job: dict[str, Any], detail: str) -> str:
-    text = " ".join((str(job.get("jobName") or ""), str(job.get("company") or ""), str(detail or "")))
+def detect_outsourcing(job: dict[str, Any], detail: str, *, exclude_staffing_agencies: bool = True) -> str:
+    company = str(job.get("company") or "")
+    if exclude_staffing_agencies and re.search(r"人力资源服务|劳务派遣|人才派遣|人力外包", company):
+        return "岗位发布主体为人力资源或劳务服务机构"
+    text = " ".join((str(job.get("jobName") or ""), company, str(detail or "")))
     for pattern, reason in _OUTSOURCING_PATTERNS:
         if pattern.search(text): return reason
     return ""

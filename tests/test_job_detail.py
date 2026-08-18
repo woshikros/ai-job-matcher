@@ -1,6 +1,7 @@
 import unittest
+from datetime import date
 
-from job_matcher.job_detail import _JobIntroParser
+from job_matcher.job_detail import _JobIntroParser, extract_platform_update_date
 
 
 class JobDetailParserTests(unittest.TestCase):
@@ -11,3 +12,8 @@ class JobDetailParserTests(unittest.TestCase):
         self.assertIn("负责Agent交付", text)
         self.assertIn("理解MCP", text)
         self.assertNotIn("公司简介", text)
+
+    def test_extracts_platform_update_date(self):
+        self.assertEqual(extract_platform_update_date('<span class="update-time">6月2日更新</span>', date(2026, 8, 18)), "2026-06-02")
+        self.assertEqual(extract_platform_update_date('<span class="update-time">12月30日更新</span>', date(2026, 1, 5)), "2025-12-30")
+        self.assertEqual(extract_platform_update_date('<span class="update-time">昨天更新</span>', date(2026, 8, 18)), "2026-08-17")

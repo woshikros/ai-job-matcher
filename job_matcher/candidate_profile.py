@@ -16,8 +16,8 @@ ROLE_OPTIONS = (
 )
 
 ROLE_QUERY_MAP = {
-    "AI解决方案架构师": ("AI解决方案架构师", "AI应用架构师", "AI解决方案工程师"),
-    "Solution FDE/业务型FDE": ("FDE", "Forward Deployed Engineer", "前沿部署工程师"),
+    "AI解决方案架构师": ("AI解决方案架构师", "AI应用架构师", "AI解决方案工程师", "AI项目咨询顾问", "企业AI落地顾问"),
+    "Solution FDE/业务型FDE": ("FDE", "FDE Consultant", "AI交付工程师", "AI应用顾问", "AI实施顾问", "AI使能顾问"),
     "AI产品负责人/AI产品经理": ("AI产品负责人", "AI产品经理", "Agent产品"),
     "AI转型顾问": ("AI转型顾问", "AI Transformation"),
     "Agent解决方案": ("Agent解决方案", "智能体解决方案", "AI Agent"),
@@ -30,6 +30,14 @@ DEFAULT_PROFILE: dict[str, Any] = {
     "excluded_keywords": [],
     "confirmed_skills": [],
     "confirmed_achievements": [],
+    "strict_matching": True,
+    "exclude_staffing_agencies": True,
+    "priority_threshold": 82,
+    "consider_threshold": 75,
+    "minimum_priority_jobs": 15,
+    "cautious_fallback_count": 5,
+    "max_headhunter_share": 20,
+    "headhunter_free_top_n": 3,
 }
 
 
@@ -39,6 +47,22 @@ def _list(value: Any) -> list[str]:
     if not isinstance(value, Iterable) or isinstance(value, (bytes, dict)):
         return []
     return list(dict.fromkeys(str(item).strip() for item in value if str(item).strip()))
+
+
+def _int(value: Any, default: int, minimum: int, maximum: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(minimum, min(maximum, parsed))
+
+
+def _bool(value: Any, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def get_candidate_profile() -> dict[str, Any]:
@@ -59,6 +83,16 @@ def get_candidate_profile() -> dict[str, Any]:
     result["salary_upper_floor"] = normalise_salary_floor(
         result.get("salary_upper_floor", saved_floor)
     )
+    result["strict_matching"] = _bool(result.get("strict_matching"), True)
+    result["exclude_staffing_agencies"] = _bool(result.get("exclude_staffing_agencies"), True)
+    result["priority_threshold"] = _int(result.get("priority_threshold"), 82, 70, 95)
+    result["consider_threshold"] = min(
+        result["priority_threshold"], _int(result.get("consider_threshold"), 75, 50, 94)
+    )
+    result["minimum_priority_jobs"] = _int(result.get("minimum_priority_jobs"), 15, 0, 30)
+    result["cautious_fallback_count"] = _int(result.get("cautious_fallback_count"), 5, 0, 10)
+    result["max_headhunter_share"] = _int(result.get("max_headhunter_share"), 20, 0, 100)
+    result["headhunter_free_top_n"] = _int(result.get("headhunter_free_top_n"), 3, 0, 10)
     return result
 
 
@@ -70,7 +104,16 @@ def save_candidate_profile(profile: dict[str, Any]) -> dict[str, Any]:
         "excluded_keywords": _list(profile.get("excluded_keywords")),
         "confirmed_skills": _list(profile.get("confirmed_skills")),
         "confirmed_achievements": _list(profile.get("confirmed_achievements")),
+        "strict_matching": _bool(profile.get("strict_matching"), True),
+        "exclude_staffing_agencies": _bool(profile.get("exclude_staffing_agencies"), True),
+        "priority_threshold": _int(profile.get("priority_threshold"), 82, 70, 95),
+        "consider_threshold": _int(profile.get("consider_threshold"), 75, 50, 94),
+        "minimum_priority_jobs": _int(profile.get("minimum_priority_jobs"), 15, 0, 30),
+        "cautious_fallback_count": _int(profile.get("cautious_fallback_count"), 5, 0, 10),
+        "max_headhunter_share": _int(profile.get("max_headhunter_share"), 20, 0, 100),
+        "headhunter_free_top_n": _int(profile.get("headhunter_free_top_n"), 3, 0, 10),
     }
+    cleaned["consider_threshold"] = min(cleaned["consider_threshold"], cleaned["priority_threshold"])
     save_setting("candidate_profile", cleaned)
     save_setting("salary_upper_floor", cleaned["salary_upper_floor"])
     return cleaned
@@ -89,7 +132,8 @@ def profile_queries(profile: dict[str, Any] | None = None) -> list[str]:
     profile = profile or get_candidate_profile()
     queries: list[str] = []
     for role in profile.get("target_roles", []):
-        queries.extend(ROLE_QUERY_MAP.get(role, (role,)))
+        mapped = ROLE_QUERY_MAP.get(role, (role,))
+        queries.extend(mapped)
     return list(dict.fromkeys(item for item in queries if item))
 
 

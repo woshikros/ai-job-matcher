@@ -15,14 +15,14 @@ def make_job(score: int, number: int) -> ReportJob:
 
 class SelectionTests(unittest.TestCase):
     def _select(self, high_count: int):
-        jobs = [make_job(80, i) for i in range(high_count)]
-        jobs += [make_job(69 - i, 100 + i) for i in range(10)]
-        return select_jobs(jobs)
+        jobs = [make_job(85, i) for i in range(high_count)]
+        jobs += [make_job(81 - i, 100 + i) for i in range(10)]
+        return select_jobs(jobs, threshold=82, consider_threshold=75, minimum_high=15, fallback_count=5)
 
     def test_selection_boundaries(self):
         self.assertEqual(len(self._select(10)), 15)
-        self.assertEqual(len(self._select(24)), 29)
-        self.assertEqual(len(self._select(25)), 25)
+        self.assertEqual(len(self._select(14)), 19)
+        self.assertEqual(len(self._select(15)), 15)
         self.assertEqual(len(self._select(29)), 29)
         self.assertEqual(len(self._select(35)), 30)
 
@@ -40,6 +40,16 @@ class SelectionTests(unittest.TestCase):
         self.assertEqual(len(jobs), 2)
         self.assertEqual(jobs[0].duplicate_group, jobs[1].duplicate_group)
         self.assertEqual(jobs[0].duplicate_sources, ["liepin", "zhilian"])
+
+    def test_headhunters_are_capped_and_never_appear_in_top_three(self):
+        jobs = []
+        for index in range(8):
+            item = make_job(90 - index, index); item.recruiter_type = "unknown"; jobs.append(item)
+        for index in range(4):
+            item = make_job(95 - index, 100 + index); item.recruiter_type = "headhunter"; jobs.append(item)
+        selected = [item for item in select_jobs(jobs, threshold=82, consider_threshold=75, minimum_high=15, fallback_count=5, max_headhunter_share=20, headhunter_free_top_n=3) if not item.is_excluded]
+        self.assertTrue(all(item.recruiter_type != "headhunter" for item in selected[:3]))
+        self.assertLessEqual(sum(item.recruiter_type == "headhunter" for item in selected) * 100, len(selected) * 20)
 
 
 class GreetingValidationTests(unittest.TestCase):

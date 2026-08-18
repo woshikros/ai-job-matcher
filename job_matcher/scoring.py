@@ -5,6 +5,7 @@ import os
 import re
 import urllib.error
 import urllib.request
+import unicodedata
 from dataclasses import dataclass, field
 from typing import Any, Iterable
 
@@ -42,7 +43,11 @@ BUSINESS_GROUPS: dict[str, tuple[str, ...]] = {
 
 ROLE_FAMILY_TERMS: dict[str, tuple[str, ...]] = {
     "AI解决方案架构师": ("ai解决方案", "ai方案", "ai应用架构", "大模型解决方案", "智能体解决方案"),
-    "Solution FDE/业务型FDE": ("fde", "forward deployed", "前沿部署", "客户现场ai"),
+    "Solution FDE/业务型FDE": (
+        "fde", "forward deployed", "前沿部署", "客户现场ai", "fde consultant", "ai交付",
+        "ai应用顾问", "ai项目咨询顾问", "ai practice consultant", "ai实施顾问", "ai使能顾问",
+        "企业ai落地", "ai业务解决方案顾问",
+    ),
     "AI产品负责人/AI产品经理": ("ai产品", "agent产品", "智能体产品", "大模型产品"),
     "AI转型顾问": ("ai转型", "ai transformation", "数字化转型顾问"),
     "Agent解决方案": ("agent解决方案", "智能体解决方案", "ai agent", "agent应用"),
@@ -167,6 +172,7 @@ def _location_salary_score(job: dict[str, Any], target_cities: Iterable[str] | N
 
 
 def score_job(resume_text: str, job: dict[str, Any], target_title: str | Iterable[str] = "", target_cities: Iterable[str] | None = None, salary_floor: int = 0) -> MatchResult:
+    resume_text = unicodedata.normalize("NFKC", str(resume_text or ""))
     description, title = job_text(job), str(job.get("jobName") or job.get("title") or "")
     target_roles = _as_list(target_title) or ([title] if title else [])
     direction_ok, direction_score, direction_evidence = evaluate_role_direction(title, description, target_roles)

@@ -15,6 +15,7 @@ from .branding import get_source_logos
 from .candidate_profile import ROLE_OPTIONS, extract_profile_suggestions, get_candidate_profile, profile_is_complete, save_candidate_profile
 from .cli_client import LiepinCliError, search_jobs
 from .backup import export_backup, parse_backup, restore_backup
+from .daily_report import is_priority_job, recommendation_threshold
 from .greetings import generate_headhunter_greeting, generate_local_greeting
 from .recruiting import RECRUITER_TYPES
 from .resume import ResumeReadError, extract_resume_text
@@ -44,7 +45,7 @@ def startup() -> None:
 def _refresh_existing_headhunter_greetings() -> None:
     _, jobs=load_daily_report()
     for job in jobs:
-        if job.get("recruiter_type")!="headhunter" or int(job.get("score",0))<70 or job.get("is_excluded") or str(job.get("greeting") or "").startswith("硬指标清单："): continue
+        if job.get("recruiter_type")!="headhunter" or not is_priority_job(job) or str(job.get("greeting") or "").startswith("硬指标清单："): continue
         try:
             existing=get_manual_greeting(str(job["job_id"]),str(job["fingerprint"])); version=int(existing["version"])+1 if existing else 1; greeting=generate_headhunter_greeting(job,version); save_manual_greeting(str(job["job_id"]),str(job["fingerprint"]),greeting,version)
         except (KeyError,ValueError): continue
@@ -89,7 +90,7 @@ def dashboard(
         "daily_report.html",
         {
             "address": "、".join(profile.get("cities", [])), "generated_at": "", "report_date": report_date,
-            "jobs": jobs, "qualified": sum(int(item.get("score", 0)) >= 70 and not item.get("is_excluded") for item in jobs),
+            "jobs": jobs, "qualified": sum(is_priority_job(item) for item in jobs),
             "supplemental": sum(bool(item.get("is_supplemental")) and not item.get("is_excluded") for item in jobs),
             "excluded_count": sum(bool(item.get("is_excluded")) for item in jobs),
             "report_dates": report_dates, "status_filter": status,
@@ -134,10 +135,27 @@ def index(request: Request, message: str = "", error: str = ""):
 
 
 @app.post("/profile")
-def update_candidate_profile(cities: Annotated[str, Form()] = "", target_roles: Annotated[list[str] | None, Form()] = None, custom_roles: Annotated[str, Form()] = "", salary_upper_floor: Annotated[int, Form()] = DEFAULT_SALARY_UPPER_FLOOR, excluded_keywords: Annotated[str, Form()] = "", confirmed_skills: Annotated[str, Form()] = "", confirmed_achievements: Annotated[str, Form()] = ""):
+def update_candidate_profile(
+    cities: Annotated[str, Form()] = "", target_roles: Annotated[list[str] | None, Form()] = None,
+    custom_roles: Annotated[str, Form()] = "", salary_upper_floor: Annotated[int, Form()] = DEFAULT_SALARY_UPPER_FLOOR,
+    excluded_keywords: Annotated[str, Form()] = "", confirmed_skills: Annotated[str, Form()] = "",
+    confirmed_achievements: Annotated[str, Form()] = "", strict_matching: Annotated[str | None, Form()] = None,
+    exclude_staffing_agencies: Annotated[str | None, Form()] = None, priority_threshold: Annotated[int, Form()] = 82,
+    consider_threshold: Annotated[int, Form()] = 75, minimum_priority_jobs: Annotated[int, Form()] = 15,
+    cautious_fallback_count: Annotated[int, Form()] = 5, max_headhunter_share: Annotated[int, Form()] = 20,
+    headhunter_free_top_n: Annotated[int, Form()] = 3,
+):
     roles = list(target_roles or [])
     if custom_roles.strip(): roles.extend(custom_roles.replace("，", "\n").replace(",", "\n").splitlines())
-    profile = save_candidate_profile({"cities": cities, "target_roles": roles, "salary_upper_floor": salary_upper_floor, "excluded_keywords": excluded_keywords, "confirmed_skills": confirmed_skills, "confirmed_achievements": confirmed_achievements})
+    profile = save_candidate_profile({
+        "cities": cities, "target_roles": roles, "salary_upper_floor": salary_upper_floor,
+        "excluded_keywords": excluded_keywords, "confirmed_skills": confirmed_skills,
+        "confirmed_achievements": confirmed_achievements, "strict_matching": strict_matching is not None,
+        "exclude_staffing_agencies": exclude_staffing_agencies is not None, "priority_threshold": priority_threshold,
+        "consider_threshold": consider_threshold, "minimum_priority_jobs": minimum_priority_jobs,
+        "cautious_fallback_count": cautious_fallback_count, "max_headhunter_share": max_headhunter_share,
+        "headhunter_free_top_n": headhunter_free_top_n,
+    })
     if not profile.get("cities") or not profile.get("target_roles"): return RedirectResponse("/settings?error=请至少填写一个城市并选择一个目标岗位方向", status_code=303)
     return RedirectResponse("/settings?message=求职档案已保存，今后的工作日报会使用这些设置", status_code=303)
 
@@ -179,7 +197,7 @@ def update_recruiter(job_id: str, payload: RecruiterUpdate):
     if not job: return JSONResponse({"error":"岗位不存在或岗位内容已更新"},status_code=404)
     set_recruiter_override(payload.fingerprint,payload.recruiter_type); existing=get_manual_greeting(job_id,payload.fingerprint); version=int(existing["version"])+1 if existing else 1; job["recruiter_type"]=payload.recruiter_type
     if payload.recruiter_type=="headhunter": greeting=generate_headhunter_greeting(job,version); save_manual_greeting(job_id,payload.fingerprint,greeting,version)
-    elif int(job.get("score",0))<70: greeting=generate_local_greeting(job,version); save_manual_greeting(job_id,payload.fingerprint,greeting,version)
+    elif int(job.get("score",0))<recommendation_threshold(job): greeting=generate_local_greeting(job,version); save_manual_greeting(job_id,payload.fingerprint,greeting,version)
     else: delete_manual_greeting(job_id,payload.fingerprint); greeting=str(job.get("greeting") or "")
     return {"ok":True,"recruiter_type":payload.recruiter_type,"greeting":greeting}
 
@@ -187,7 +205,8 @@ def update_recruiter(job_id: str, payload: RecruiterUpdate):
 def create_low_score_greeting(job_id: str, payload: GreetingRequest):
     job=find_report_job(job_id,payload.fingerprint)
     if not job: return JSONResponse({"error":"岗位不存在或岗位内容已更新"},status_code=404)
-    if int(job.get("score",0))>=70: return JSONResponse({"error":"70分以上岗位使用每日定制招呼语"},status_code=400)
+    threshold=recommendation_threshold(job)
+    if int(job.get("score",0))>=threshold: return JSONResponse({"error":f"{threshold}分以上优先岗位使用每日定制招呼语"},status_code=400)
     existing=get_manual_greeting(job_id,payload.fingerprint)
     if existing and not payload.regenerate: return {"ok":True,**existing}
     from .storage import get_recruiter_overrides

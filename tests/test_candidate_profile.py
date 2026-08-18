@@ -29,8 +29,9 @@ class CandidateProfileTests(unittest.TestCase):
 
     def test_profile_is_local_complete_and_drives_queries(self):
         storage.save_setting("resume_text", "示例简历")
-        saved = save_candidate_profile({"cities": ["深圳", "广州"], "target_roles": ["AI解决方案架构师"], "salary_upper_floor": 25000, "excluded_keywords": [], "confirmed_skills": ["示例能力"], "confirmed_achievements": ["示例成果"]})
+        saved = save_candidate_profile({"cities": ["深圳", "广州"], "target_roles": ["AI解决方案架构师"], "salary_upper_floor": 25000, "excluded_keywords": [], "confirmed_skills": ["示例能力"], "confirmed_achievements": ["示例成果"], "strict_matching": True, "exclude_staffing_agencies": True, "priority_threshold": 84, "consider_threshold": 76, "minimum_priority_jobs": 12, "cautious_fallback_count": 4, "max_headhunter_share": 25, "headhunter_free_top_n": 2})
         self.assertTrue(profile_is_complete(saved)); self.assertIn("AI解决方案架构师", profile_queries(saved)); self.assertEqual(get_candidate_profile()["cities"], ["深圳", "广州"])
+        self.assertEqual(saved["priority_threshold"], 84); self.assertEqual(saved["max_headhunter_share"], 25)
         keys = [item["key"] for item in export_backup().get("settings", [])]
         self.assertNotIn("candidate_profile", keys)
 
