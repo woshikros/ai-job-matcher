@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from contextlib import closing
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +15,19 @@ DB_PATH = DATA_DIR / "matcher.db"
 FEEDBACK_OUTCOMES={"unknown":"未更新","read_no_reply":"已读未回","resume_requested_stalled":"索要简历后无回复","communicating":"沟通中","rejected":"明确不合适","interview":"面试邀约"}
 REJECTION_REASONS=("原因未说明","年龄或资历","学历或学校","工作稳定性","行业经验","技术栈或开发深度","项目或交付经验","管理经验或职级","薪资","地点、出差或驻场","岗位方向","其他")
 LEGACY_FEEDBACK={"unknown":"unknown","read_no_reply":"read_no_reply","resume_requested_stalled":"replied","communicating":"replied","rejected":"replied","interview":"interview"}
+CONVERSATION_NOISE_PATTERNS=("职位竞争力PK","职位竞争者PK","竞争力分析","不错过TA的回复","开启微信通知","不支持此消息查看","请登录APP查看","系统通知")
+GENERIC_RECRUITER_REPLY_PATTERNS=("我会认真看","我会仔细看","合适的话","及时与您联系","及时和您联系","感兴趣的话","欢迎投递","可以聊聊","方便聊聊","方便聊一下","看看您的简历")
+CONVERSATION_THEME_RULES={
+    "技术栈或开发深度":("技术栈","开发经验","编码","代码","python","java","c++","工程能力"),
+    "行业经验":("行业经验","金融经验","制造业经验","互联网经验","saas经验","垂直行业"),
+    "年龄或资历":("年龄","35岁","资历","年限不符","经验年限"),
+    "学历或学校":("学历","学校","本科","硕士","博士","名校"),
+    "工作稳定性":("稳定性","跳槽","工作经历太短","任职时间"),
+    "管理经验或职级":("管理经验","带团队","管理岗","职级"),
+    "薪资":("薪资","预算","期望过高"),
+    "地点、出差或驻场":("地点","出差","驻场","异地","搬迁"),
+    "岗位方向":("岗位方向","不匹配","不合适","暂不考虑","不太符合"),
+}
 
 
 def initialize() -> None:
@@ -119,8 +133,28 @@ def initialize() -> None:
             note TEXT NOT NULL DEFAULT '', active INTEGER NOT NULL DEFAULT 1, updated_at TEXT NOT NULL)""")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_applications_search ON application_records(company,job_name,recruiter_name)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_applications_applied_at ON application_records(applied_at)")
+        connection.execute("""CREATE TABLE IF NOT EXISTS conversation_threads (
+            source TEXT NOT NULL, thread_id TEXT NOT NULL, recruiter_name TEXT NOT NULL DEFAULT '',
+            company TEXT NOT NULL DEFAULT '', job_name TEXT NOT NULL DEFAULT '', platform_job_id TEXT NOT NULL DEFAULT '',
+            job_url TEXT NOT NULL DEFAULT '', unread_count INTEGER NOT NULL DEFAULT 0,
+            last_message TEXT NOT NULL DEFAULT '', last_sender TEXT NOT NULL DEFAULT 'unknown',
+            last_message_at TEXT NOT NULL DEFAULT '', synced_at TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1,
+            application_job_id TEXT NOT NULL DEFAULT '', PRIMARY KEY(source,thread_id))""")
+        connection.execute("""CREATE TABLE IF NOT EXISTS conversation_messages (
+            source TEXT NOT NULL, thread_id TEXT NOT NULL, message_id TEXT NOT NULL,
+            sender TEXT NOT NULL DEFAULT 'unknown', sender_name TEXT NOT NULL DEFAULT '',
+            message_type TEXT NOT NULL DEFAULT 'text', content TEXT NOT NULL DEFAULT '',
+            sent_at TEXT NOT NULL DEFAULT '', synced_at TEXT NOT NULL,
+            PRIMARY KEY(source,thread_id,message_id))""")
+        connection.execute("""CREATE TABLE IF NOT EXISTS conversation_sync_runs (
+            source TEXT PRIMARY KEY, checked_at TEXT NOT NULL, status TEXT NOT NULL,
+            thread_count INTEGER NOT NULL DEFAULT 0, message_count INTEGER NOT NULL DEFAULT 0,
+            error TEXT NOT NULL DEFAULT '')""")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_conversation_threads_recent ON conversation_threads(active,last_message_at,synced_at)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_conversation_messages_thread ON conversation_messages(source,thread_id,sent_at)")
         _migrate_platform_columns(connection)
         _migrate_application_feedback(connection)
+        _migrate_conversations(connection)
         _backfill_job_sightings(connection)
         _backfill_skill_observations(connection)
         _backfill_application_records(connection)
@@ -128,6 +162,227 @@ def initialize() -> None:
 
 def _columns(connection: sqlite3.Connection, table: str) -> set[str]:
     return {str(row[1]) for row in connection.execute(f"PRAGMA table_info({table})")}
+
+def _migrate_conversations(connection: sqlite3.Connection) -> None:
+    columns=_columns(connection,"conversation_threads")
+    if "application_job_id" not in columns: connection.execute("ALTER TABLE conversation_threads ADD COLUMN application_job_id TEXT NOT NULL DEFAULT ''")
+    for pattern in CONVERSATION_NOISE_PATTERNS:
+        connection.execute("UPDATE conversation_threads SET last_sender='system' WHERE last_sender='recruiter' AND last_message LIKE ?",(f"%{pattern}%",))
+
+def _clean_conversation_text(value: Any,limit: int) -> str:
+    text=re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]","",str(value or ""))
+    return text.replace("\u200b","").replace("\ufeff","").strip()[:limit]
+
+def _is_conversation_noise(value: Any) -> bool:
+    text=_clean_conversation_text(value,4000).lower()
+    return any(pattern.lower() in text for pattern in CONVERSATION_NOISE_PATTERNS)
+
+def _conversation_sender(value: Any,message: str) -> str:
+    if _is_conversation_noise(message): return "system"
+    sender=str(value or "unknown")
+    return sender if sender in {"me","recruiter","system","unknown"} else "unknown"
+
+def _conversation_local_minute(value: Any) -> str:
+    text=_clean_conversation_text(value,60)
+    if not text: return ""
+    try:
+        parsed=datetime.fromisoformat(text.replace("Z","+00:00"))
+        if parsed.tzinfo is not None: parsed=parsed.astimezone(timezone(timedelta(hours=8)))
+        return parsed.strftime("%m-%d %H:%M")
+    except ValueError: pass
+    matched=re.search(r"(?:(\d{4})年)?(\d{1,2})月(\d{1,2})日\s*(\d{1,2}):(\d{2})",text)
+    if not matched: return ""
+    _,month,day,hour,minute=matched.groups()
+    return f"{int(month):02d}-{int(day):02d} {int(hour):02d}:{int(minute):02d}"
+
+def _same_liepin_message(existing: sqlite3.Row,sender: str,content: str,sent_at: str) -> bool:
+    if str(existing["sender"])!=sender: return False
+    if _conversation_local_minute(existing["sent_at"])!=_conversation_local_minute(sent_at): return False
+    old=re.sub(r"\s+","",str(existing["content"] or "")); new=re.sub(r"\s+","",content)
+    if old==new: return True
+    shorter,longer=sorted((old,new),key=len)
+    return len(shorter)>=6 and longer.startswith(shorter)
+
+def record_conversation_sync(source: str,*,status: str,thread_count: int=0,message_count: int=0,error: str="") -> None:
+    if source!="liepin": raise ValueError("脱敏版只支持猎聘会话")
+    if status not in {"ok","failed"}: raise ValueError("无效同步状态")
+    initialize(); now=datetime.now().isoformat(timespec="seconds")
+    with closing(sqlite3.connect(DB_PATH)) as connection,connection:
+        connection.execute("""INSERT INTO conversation_sync_runs(source,checked_at,status,thread_count,message_count,error)
+            VALUES(?,?,?,?,?,?) ON CONFLICT(source) DO UPDATE SET checked_at=excluded.checked_at,status=excluded.status,
+            thread_count=excluded.thread_count,message_count=excluded.message_count,error=excluded.error""",
+            (source,now,status,max(0,int(thread_count)),max(0,int(message_count)),_clean_conversation_text(error,500)))
+
+def get_conversation_sync_statuses() -> dict[str,dict[str,Any]]:
+    initialize(); result={"liepin":{"source":"liepin","checked_at":"","status":"pending","thread_count":0,"message_count":0,"error":"尚未同步；请先打开已登录的猎聘候选人端"}}
+    with closing(sqlite3.connect(DB_PATH)) as connection:
+        connection.row_factory=sqlite3.Row
+        row=connection.execute("SELECT * FROM conversation_sync_runs WHERE source='liepin'").fetchone()
+        if row: result["liepin"]=dict(row)
+    return result
+
+def upsert_conversation_threads(source: str,threads: list[dict[str,Any]]) -> int:
+    if source!="liepin": raise ValueError("脱敏版只支持猎聘会话")
+    initialize(); now=datetime.now().isoformat(timespec="seconds"); written=0
+    with closing(sqlite3.connect(DB_PATH)) as connection,connection:
+        for item in threads:
+            thread_id=_clean_conversation_text(item.get("thread_id"),160)
+            if not thread_id: continue
+            last_message=_clean_conversation_text(item.get("last_message"),1000)
+            connection.execute("""INSERT INTO conversation_threads(source,thread_id,recruiter_name,company,job_name,platform_job_id,job_url,
+                unread_count,last_message,last_sender,last_message_at,synced_at,active) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,1)
+                ON CONFLICT(source,thread_id) DO UPDATE SET recruiter_name=excluded.recruiter_name,company=excluded.company,
+                job_name=excluded.job_name,platform_job_id=excluded.platform_job_id,job_url=excluded.job_url,
+                unread_count=excluded.unread_count,last_message=excluded.last_message,last_sender=excluded.last_sender,
+                last_message_at=excluded.last_message_at,synced_at=excluded.synced_at,active=1""",
+                (source,thread_id,_clean_conversation_text(item.get("recruiter_name"),100),_clean_conversation_text(item.get("company"),160),
+                 _clean_conversation_text(item.get("job_name"),160),_clean_conversation_text(item.get("platform_job_id"),180),
+                 _clean_conversation_text(item.get("job_url"),600),max(0,int(item.get("unread_count") or 0)),last_message,
+                 _conversation_sender(item.get("last_sender"),last_message),_clean_conversation_text(item.get("last_message_at"),60),now))
+            written+=1
+    return written
+
+def replace_conversation_threads(source: str,threads: list[dict[str,Any]]) -> int:
+    initialize()
+    with closing(sqlite3.connect(DB_PATH)) as connection,connection: connection.execute("UPDATE conversation_threads SET active=0 WHERE source=?",(source,))
+    return upsert_conversation_threads(source,threads)
+
+def upsert_conversation_messages(source: str,thread_id: str,messages: list[dict[str,Any]]) -> int:
+    clean_thread_id=_clean_conversation_text(thread_id,160)
+    if source!="liepin" or not clean_thread_id: raise ValueError("无效会话标识")
+    initialize(); now=datetime.now().isoformat(timespec="seconds"); written=0
+    with closing(sqlite3.connect(DB_PATH)) as connection,connection:
+        connection.row_factory=sqlite3.Row
+        for index,item in enumerate(messages):
+            message_id=_clean_conversation_text(item.get("message_id"),200) or f"local-{index}"
+            sender=str(item.get("sender") or "unknown")
+            if sender not in {"me","recruiter","system","unknown"}: sender="unknown"
+            content=_clean_conversation_text(item.get("content"),4000); sent_at=_clean_conversation_text(item.get("sent_at"),60)
+            rows=connection.execute("""SELECT message_id,sender,content,sent_at FROM conversation_messages
+                WHERE source=? AND thread_id=? AND sender=? ORDER BY CASE WHEN message_id LIKE 'fallback-%' THEN 1 ELSE 0 END""",
+                (source,clean_thread_id,sender)).fetchall()
+            duplicate=next((row for row in rows if _same_liepin_message(row,sender,content,sent_at)),None)
+            if duplicate is not None:
+                duplicate_id=str(duplicate["message_id"])
+                if duplicate_id.startswith("fallback-") and not message_id.startswith("fallback-"):
+                    connection.execute("DELETE FROM conversation_messages WHERE source=? AND thread_id=? AND message_id=?",(source,clean_thread_id,duplicate_id))
+                else:
+                    if duplicate_id!=message_id: connection.execute("DELETE FROM conversation_messages WHERE source=? AND thread_id=? AND message_id=?",(source,clean_thread_id,message_id))
+                    connection.execute("UPDATE conversation_messages SET synced_at=? WHERE source=? AND thread_id=? AND message_id=?",(now,source,clean_thread_id,duplicate_id)); written+=1; continue
+            connection.execute("""INSERT INTO conversation_messages(source,thread_id,message_id,sender,sender_name,message_type,content,sent_at,synced_at)
+                VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(source,thread_id,message_id) DO UPDATE SET sender=excluded.sender,
+                sender_name=excluded.sender_name,message_type=excluded.message_type,content=excluded.content,sent_at=excluded.sent_at,synced_at=excluded.synced_at""",
+                (source,clean_thread_id,message_id,sender,_clean_conversation_text(item.get("sender_name"),100),
+                 _clean_conversation_text(item.get("message_type") or "text",40),content,sent_at,now)); written+=1
+        connection.execute("UPDATE conversation_threads SET synced_at=? WHERE source=? AND thread_id=?",(now,source,clean_thread_id))
+    return written
+
+def search_conversations(query: str="",source: str="all",needs_reply: str="all") -> list[dict[str,Any]]:
+    initialize(); clauses=["t.active=1"]; values=[]
+    if query.strip():
+        token=f"%{query.strip()}%"; clauses.append("(t.recruiter_name LIKE ? OR t.company LIKE ? OR t.job_name LIKE ? OR t.last_message LIKE ? OR EXISTS(SELECT 1 FROM conversation_messages m WHERE m.source=t.source AND m.thread_id=t.thread_id AND m.content LIKE ?))"); values.extend([token]*5)
+    if source=="liepin": clauses.append("t.source='liepin'")
+    if needs_reply=="yes":
+        clauses.append("t.last_sender='recruiter'")
+        for pattern in CONVERSATION_NOISE_PATTERNS: clauses.append("t.last_message NOT LIKE ?"); values.append(f"%{pattern}%")
+    elif needs_reply=="no": clauses.append("t.last_sender!='recruiter'")
+    with closing(sqlite3.connect(DB_PATH)) as connection:
+        connection.row_factory=sqlite3.Row
+        rows=connection.execute(f"""SELECT t.*,(SELECT COUNT(*) FROM conversation_messages m WHERE m.source=t.source AND m.thread_id=t.thread_id) message_count
+            FROM conversation_threads t WHERE {' AND '.join(clauses)} ORDER BY CASE WHEN t.last_message_at='' THEN 1 ELSE 0 END,t.last_message_at DESC,t.synced_at DESC""",values).fetchall()
+    return [dict(row) for row in rows]
+
+def get_conversation(source: str,thread_id: str) -> dict[str,Any]|None:
+    initialize()
+    with closing(sqlite3.connect(DB_PATH)) as connection:
+        connection.row_factory=sqlite3.Row; row=connection.execute("SELECT * FROM conversation_threads WHERE source=? AND thread_id=? AND active=1",(source,thread_id)).fetchone()
+    return dict(row) if row else None
+
+def list_conversation_messages(source: str,thread_id: str) -> list[dict[str,Any]]:
+    initialize()
+    with closing(sqlite3.connect(DB_PATH)) as connection:
+        connection.row_factory=sqlite3.Row; rows=connection.execute("SELECT * FROM conversation_messages WHERE source=? AND thread_id=? ORDER BY CASE WHEN sent_at='' THEN 1 ELSE 0 END,sent_at,rowid",(source,thread_id)).fetchall()
+    return [dict(row) for row in rows]
+
+def get_conversation_statistics() -> dict[str,int]:
+    initialize()
+    with closing(sqlite3.connect(DB_PATH)) as connection:
+        connection.row_factory=sqlite3.Row; total=int(connection.execute("SELECT COUNT(*) FROM conversation_threads WHERE active=1").fetchone()[0]); messages=int(connection.execute("SELECT COUNT(*) FROM conversation_messages").fetchone()[0])
+        pending=connection.execute("SELECT last_message FROM conversation_threads WHERE active=1 AND last_sender='recruiter'").fetchall()
+        rows=connection.execute("""SELECT t.thread_id,t.recruiter_name,t.company,m.content FROM conversation_threads t JOIN conversation_messages m ON m.source=t.source AND m.thread_id=t.thread_id WHERE t.active=1 AND m.sender='recruiter'""").fetchall()
+    contacted=set(); recruiter_messages=0
+    for row in rows:
+        if _is_conversation_noise(row["content"]): continue
+        recruiter_messages+=1; contacted.add((str(row["recruiter_name"] or row["thread_id"]),str(row["company"] or "")))
+    return {"threads":total,"needs_reply":sum(not _is_conversation_noise(row["last_message"]) for row in pending),"messages":messages,"recruiter_contacted":len(contacted),"recruiter_messages":recruiter_messages}
+
+def _conversation_match_text(value: Any) -> str:
+    return re.sub(r"(?:有限责任公司|股份有限公司|有限公司|集团|公司)$","",re.sub(r"\s+","",str(value or "").lower()))
+
+def get_conversation_application_candidates(source: str,thread_id: str,limit: int=12) -> list[dict[str,Any]]:
+    thread=get_conversation(source,thread_id)
+    if not thread: return []
+    rows=search_application_records(source=source); company=_conversation_match_text(thread.get("company")); job_name=_conversation_match_text(thread.get("job_name")); recruiter=_conversation_match_text(thread.get("recruiter_name")); ranked=[]
+    for item in rows:
+        score=0; reasons=[]; cc=_conversation_match_text(item.get("company")); cj=_conversation_match_text(item.get("job_name")); cr=_conversation_match_text(item.get("recruiter_name"))
+        if company and cc:
+            if company==cc: score+=60; reasons.append("公司一致")
+            elif company in cc or cc in company: score+=40; reasons.append("公司名称接近")
+        if job_name and cj:
+            if job_name==cj: score+=40; reasons.append("岗位一致")
+            elif job_name in cj or cj in job_name: score+=25; reasons.append("岗位名称接近")
+        if recruiter and cr and recruiter==cr: score+=25; reasons.append("招聘者一致")
+        if score: ranked.append({**item,"match_score":score,"match_reasons":reasons})
+    if not ranked: ranked=[{**item,"match_score":0,"match_reasons":["同平台近期投递"]} for item in rows[:limit]]
+    return sorted(ranked,key=lambda item:(int(item["match_score"]),str(item.get("applied_at") or "")),reverse=True)[:limit]
+
+def link_conversation_application(source: str,thread_id: str,job_id: str) -> dict[str,Any]:
+    if source!="liepin" or not get_conversation(source,thread_id): raise ValueError("没有找到该猎聘会话")
+    rows=search_application_records(source="liepin"); application=next((row for row in rows if str(row["job_id"])==job_id),None)
+    if not application: raise ValueError("没有找到猎聘投递记录")
+    with closing(sqlite3.connect(DB_PATH)) as connection,connection: connection.execute("UPDATE conversation_threads SET application_job_id=? WHERE source=? AND thread_id=?",(job_id,source,thread_id))
+    return application
+
+def auto_link_conversation_application(source: str,thread_id: str) -> dict[str,Any]|None:
+    thread=get_conversation(source,thread_id)
+    if not thread: return None
+    linked=str(thread.get("application_job_id") or "")
+    if linked: return next((row for row in search_application_records(source=source) if str(row["job_id"])==linked),None)
+    candidates=get_conversation_application_candidates(source,thread_id)
+    if not candidates or int(candidates[0]["match_score"])<60 or (len(candidates)>1 and candidates[0]["match_score"]==candidates[1]["match_score"]): return None
+    return link_conversation_application(source,thread_id,str(candidates[0]["job_id"]))
+
+def get_conversation_insights() -> dict[str,Any]:
+    initialize()
+    with closing(sqlite3.connect(DB_PATH)) as connection:
+        connection.row_factory=sqlite3.Row
+        rows=connection.execute("""SELECT t.thread_id,t.recruiter_name,t.company,m.content,m.sent_at FROM conversation_threads t JOIN conversation_messages m ON m.source=t.source AND m.thread_id=t.thread_id WHERE t.active=1 AND m.sender='recruiter'""").fetchall()
+        feedback=connection.execute("SELECT rejection_reasons,feedback_note FROM application_records WHERE active=1 AND feedback_outcome='rejected'").fetchall()
+    seen=set(); messages=[]; theme_counts={}; evidence={}; generic_count=0; manual_explicit=0; unspecified=0
+    for row in rows:
+        content=_clean_conversation_text(row["content"],1000)
+        if not content or _is_conversation_noise(content): continue
+        key=(str(row["recruiter_name"] or row["thread_id"]),re.sub(r"\s+","",content))
+        if key in seen: continue
+        seen.add(key); lowered=content.lower(); generic=any(pattern.lower() in lowered for pattern in GENERIC_RECRUITER_REPLY_PATTERNS); generic_count+=int(generic)
+        themes=[reason for reason,words in CONVERSATION_THEME_RULES.items() if any(word.lower() in lowered for word in words)]
+        for reason in themes:
+            theme_counts[reason]=theme_counts.get(reason,0)+1; evidence.setdefault(reason,[])
+            if len(evidence[reason])<3: evidence[reason].append(content[:140])
+        messages.append({"recruiter_name":str(row["recruiter_name"] or "招聘者"),"company":str(row["company"] or "公司待确认"),"content":content,"sent_at":str(row["sent_at"] or ""),"generic":generic,"themes":themes})
+    for row in feedback:
+        try: reasons=json.loads(row["rejection_reasons"] or "[]")
+        except (json.JSONDecodeError,TypeError): reasons=[]
+        note=_clean_conversation_text(row["feedback_note"],1000)
+        for reason in reasons:
+            if reason not in REJECTION_REASONS: continue
+            if reason in {"原因未说明","其他"}: unspecified+=1; continue
+            manual_explicit+=1; theme_counts[reason]=theme_counts.get(reason,0)+1; evidence.setdefault(reason,[])
+            if note and len(evidence[reason])<3: evidence[reason].append(note[:140])
+    themes=[{"reason":reason,"count":count,"evidence":evidence.get(reason,[])} for reason,count in sorted(theme_counts.items(),key=lambda item:(-item[1],item[0]))]
+    recommendations=[]
+    if len([item for item in messages if item["themes"]])+manual_explicit<3: recommendations.append("当前明确原因仍然太少，不能据此断定是年龄、学历或技术背景；优先记录HR原话，再观察重复出现的模式。")
+    return {"recruiter_messages":len(messages),"generic_replies":generic_count,"substantive_replies":len(messages)-generic_count,"explicit_feedback":len([item for item in messages if item["themes"]])+manual_explicit,"unspecified_feedback":unspecified,"themes":themes,"recommendations":recommendations,"evidence":[item for item in messages if not item["generic"] or item["themes"]][:12]}
 
 def _migrate_application_feedback(connection: sqlite3.Connection) -> None:
     columns=_columns(connection,"application_records")

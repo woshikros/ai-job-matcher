@@ -15,6 +15,7 @@ from .branding import get_source_logos
 from .candidate_profile import ROLE_OPTIONS, extract_profile_suggestions, get_candidate_profile, profile_is_complete, save_candidate_profile
 from .cli_client import LiepinCliError, search_jobs
 from .backup import export_backup, parse_backup, restore_backup
+from .conversation_center import ConversationSyncError, sync_liepin_history, sync_liepin_overview
 from .daily_report import is_priority_job, recommendation_threshold
 from .greetings import generate_headhunter_greeting, generate_local_greeting
 from .recruiting import RECRUITER_TYPES
@@ -22,11 +23,17 @@ from .resume import ResumeReadError, extract_resume_text
 from .scoring import job_text, score_job
 from .salary import DEFAULT_SALARY_UPPER_FLOOR, SALARY_OPTIONS, normalise_salary_floor
 from .skill_gaps import generate_skill_gap_report
+from .liepin_bridge import bridge_status
 from .storage import (
-    DATA_DIR, FEEDBACK_OUTCOMES, REJECTION_REASONS, delete_manual_greeting, find_report_job, get_application_review, get_application_statistics,
-    get_manual_greeting, get_report_summary, get_setting, get_source_health, initialize, list_report_dates,
+    DATA_DIR, FEEDBACK_OUTCOMES, REJECTION_REASONS, auto_link_conversation_application,
+    delete_manual_greeting, find_report_job, get_application_review, get_application_statistics,
+    get_conversation, get_conversation_application_candidates, get_conversation_insights,
+    get_conversation_statistics, get_conversation_sync_statuses, get_manual_greeting,
+    get_report_summary, get_setting, get_source_health, initialize, link_conversation_application,
+    list_conversation_messages, list_report_dates,
     get_pending_feedback, list_skill_gap_report_dates, load_daily_report, load_skill_gap_report, save_manual_greeting, save_search,
-    save_setting, search_application_records, set_job_status, set_recruiter_override, update_application_record,
+    save_setting, search_application_records, search_conversations, set_job_status,
+    set_recruiter_override, update_application_record,
 )
 
 app = FastAPI(title="双平台AI岗位面板")
@@ -182,6 +189,12 @@ class ApplicationUpdate(BaseModel):
     greeting_text: str | None = None
     recruiter_type: str | None = None
 
+class ConversationSyncRequest(BaseModel):
+    max_threads: int = 60
+
+class ConversationApplicationLink(BaseModel):
+    job_id: str
+
 
 @app.post("/api/jobs/{job_id}/status")
 def update_job_status(job_id: str, payload: StatusUpdate):
@@ -220,6 +233,46 @@ def applications(request: Request,q: str="",source: str="all",recruiter_type: st
     rows=search_application_records(q,source,recruiter_type,feedback,role,date_from,date_to,rejection_reason,sort); role_options=sorted({str(item["role_family"]) for item in search_application_records()})
     return templates.TemplateResponse(request,"applications.html",{"records":rows,"q":q,"source_filter":source,"recruiter_filter":recruiter_type,"feedback_filter":feedback,"rejection_reason_filter":rejection_reason,"role_filter":role,"date_from":date_from,"date_to":date_to,"sort_filter":sort,"role_options":role_options,"statistics":get_application_statistics(),"pending_feedback":get_pending_feedback(8),"feedback_outcomes":FEEDBACK_OUTCOMES,"rejection_reasons":REJECTION_REASONS,"source_labels":{"liepin":"猎聘","zhilian":"智联招聘"},"source_logos":get_source_logos()})
 
+@app.get("/conversations",response_class=HTMLResponse)
+def conversations(request: Request,q: str="",needs_reply: str="all",selected_thread: str="",message: str="",error: str=""):
+    rows=search_conversations(q,"liepin",needs_reply); selected=None; messages=[]; candidates=[]; linked=None
+    if selected_thread:
+        selected=get_conversation("liepin",selected_thread)
+        if selected:
+            messages=list_conversation_messages("liepin",selected_thread)
+            linked=auto_link_conversation_application("liepin",selected_thread)
+            selected=get_conversation("liepin",selected_thread)
+            candidates=get_conversation_application_candidates("liepin",selected_thread)
+    status={**get_conversation_sync_statuses()["liepin"],"label":"猎聘"}; bridge=bridge_status()
+    if not bridge.get("ok"): status.update(status="failed",error="本机桥接服务未运行，请重新打开岗位面板")
+    elif not bridge.get("extension_connected"): status.update(status="failed",error="猎聘只读扩展未连接，请重新加载扩展并保持已登录网页打开")
+    return templates.TemplateResponse(request,"conversations.html",{
+        "records":rows,"q":q,"needs_reply_filter":needs_reply,"selected":selected,"messages":messages,
+        "sources":[status],"statistics":get_conversation_statistics(),"source_logos":get_source_logos(),
+        "needs_reply_records":search_conversations(source="liepin",needs_reply="yes")[:8],
+        "application_candidates":candidates,"linked_application":linked,"feedback_outcomes":FEEDBACK_OUTCOMES,
+        "rejection_reasons":REJECTION_REASONS,"conversation_insights":get_conversation_insights(),
+        "message":message,"error":error,
+    })
+
+@app.post("/api/conversations/sync")
+def sync_conversations(payload: ConversationSyncRequest):
+    try: result=sync_liepin_overview(payload.max_threads)
+    except ConversationSyncError as exc: return JSONResponse({"error":str(exc),"code":exc.code},status_code=503)
+    return {"ok":True,**result,"statistics":get_conversation_statistics()}
+
+@app.post("/api/conversations/{thread_id}/sync")
+def sync_conversation_history(thread_id: str):
+    try: result=sync_liepin_history(thread_id)
+    except ConversationSyncError as exc: return JSONResponse({"error":str(exc),"code":exc.code},status_code=404 if exc.code=="THREAD_NOT_FOUND" else 503)
+    return {"ok":True,**result,"statistics":get_conversation_statistics()}
+
+@app.post("/api/conversations/{thread_id}/application")
+def link_conversation_to_application(thread_id: str,payload: ConversationApplicationLink):
+    try: record=link_conversation_application("liepin",thread_id,payload.job_id)
+    except ValueError as exc: return JSONResponse({"error":str(exc)},status_code=400)
+    return {"ok":True,"record":record}
+
 @app.post("/api/applications/{job_id}")
 def update_application(job_id: str,payload: ApplicationUpdate):
     try: record=update_application_record(job_id,feedback_status=payload.feedback_status,feedback_outcome=payload.feedback_outcome,rejection_reasons=payload.rejection_reasons,feedback_note=payload.feedback_note,note=payload.note,greeting_text=payload.greeting_text,recruiter_type=payload.recruiter_type)
@@ -230,7 +283,7 @@ def update_application(job_id: str,payload: ApplicationUpdate):
 
 @app.get("/application-review",response_class=HTMLResponse)
 def application_review(request: Request):
-    return templates.TemplateResponse(request,"application_review.html",{"review":get_application_review(),"feedback_outcomes":FEEDBACK_OUTCOMES})
+    return templates.TemplateResponse(request,"application_review.html",{"review":get_application_review(),"feedback_outcomes":FEEDBACK_OUTCOMES,"conversation_insights":get_conversation_insights()})
 
 
 @app.get("/api/statistics/applications")

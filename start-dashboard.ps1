@@ -7,7 +7,23 @@ $healthUrl = "http://127.0.0.1:8000/api/health"
 $logDir = Join-Path $projectRoot "logs"
 $stdoutLog = Join-Path $logDir "dashboard.out.log"
 $stderrLog = Join-Path $logDir "dashboard.error.log"
+$bridgeOutLog = Join-Path $logDir "liepin_bridge.out.log"
+$bridgeErrorLog = Join-Path $logDir "liepin_bridge.error.log"
 New-Item -ItemType Directory -Path $logDir -Force | Out-Null
+$python = Join-Path $projectRoot ".venv\Scripts\python.exe"
+
+function Start-LiepinBridge {
+    try {
+        $status = Invoke-RestMethod -Uri "http://127.0.0.1:19826/status" -TimeoutSec 1
+        if ($status.ok) { return }
+    } catch {}
+    Start-Process -FilePath $python `
+        -ArgumentList "-m", "job_matcher.liepin_bridge_daemon" `
+        -WorkingDirectory $projectRoot `
+        -WindowStyle Hidden `
+        -RedirectStandardOutput $bridgeOutLog `
+        -RedirectStandardError $bridgeErrorLog
+}
 
 function Test-Dashboard {
     try {
@@ -19,7 +35,6 @@ function Test-Dashboard {
 }
 
 if (-not (Test-Dashboard)) {
-    $python = Join-Path $projectRoot ".venv\Scripts\python.exe"
     if (-not (Test-Path -LiteralPath $python)) {
         if ($NoBrowser) {
             Write-Error "没有找到本机运行环境：$python"
@@ -44,6 +59,8 @@ if (-not (Test-Dashboard)) {
         }
     }
 }
+
+Start-LiepinBridge
 
 if (Test-Dashboard) {
     if (-not $NoBrowser) {
