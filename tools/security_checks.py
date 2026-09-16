@@ -3,11 +3,12 @@ from __future__ import annotations
 import argparse
 import re
 import sys
+import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 SKIP_DIRS = {".git", ".venv", "node_modules", "__pycache__", ".pytest_cache", "data", "reports", "uploads", "logs"}
-TEXT_EXTENSIONS = {".py", ".html", ".md", ".toml", ".json", ".yml", ".yaml", ".ps1", ".cmd", ".txt"}
+TEXT_EXTENSIONS = {".py", ".html", ".md", ".toml", ".json", ".yml", ".yaml", ".ps1", ".cmd", ".txt", ".js", ".cjs", ".vbs"}
 PRIVATE_EXTENSIONS = {".pdf", ".doc", ".docx", ".db", ".sqlite", ".sqlite3", ".log"}
 SECRET_TOKEN = re.compile(r"\bsk-[A-Za-z0-9_-]{20,}\b")
 SECRET_ASSIGNMENT = re.compile(r"(?<![A-Za-z0-9_])(?:api[_-]?key|token|cookie|password)\s*[:=]\s*['\"]?([^'\"\s]{8,})", re.I)
@@ -17,6 +18,19 @@ REQUIRED_IGNORES = {"data/", "reports/", "uploads/", "logs/", "*.db", "*.pdf", "
 
 def run_checks(release: bool = False) -> list[str]:
     errors = []
+    if release:
+        try:
+            listed = subprocess.run(['git', 'ls-files', '--cached', '-z'], cwd=ROOT, capture_output=True, check=True)
+            for relative in listed.stdout.decode('utf-8').split('\0'):
+                if not relative: continue
+                path = Path(relative)
+                private = (any(part in SKIP_DIRS for part in path.parts)
+                           or path.suffix.lower() in PRIVATE_EXTENSIONS
+                           or path.name.endswith('.local.json')
+                           or (path.name.startswith('.env') and path.name != '.env.example'))
+                if private: errors.append(f'Git待发布文件包含私人数据：{relative}')
+        except (OSError, subprocess.CalledProcessError, UnicodeDecodeError):
+            errors.append('无法核验Git待发布文件清单，停止发布检查')
     for path in ROOT.rglob("*"):
         if not path.is_file() or any(part in SKIP_DIRS for part in path.relative_to(ROOT).parts): continue
         relative = path.relative_to(ROOT).as_posix()

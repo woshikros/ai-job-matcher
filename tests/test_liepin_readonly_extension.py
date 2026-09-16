@@ -9,7 +9,6 @@ class LiepinReadonlyExtensionTests(unittest.TestCase):
 
     def test_manifest_only_allows_liepin_and_local_bridge(self):
         manifest=json.loads((self.root/"manifest.json").read_text(encoding="utf-8"))
-        self.assertEqual(manifest["version"],"1.0.0")
         self.assertEqual(manifest["host_permissions"],["https://*.liepin.com/*","http://127.0.0.1:19826/*"])
 
     def test_extension_has_read_actions_without_send_capabilities(self):

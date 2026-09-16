@@ -90,7 +90,7 @@ def dashboard(
         current_zhilian = {**get_source_health("zhilian"), "label": "智联招聘"}
         source_health = [item for item in source_health if item.get("source") != "zhilian"]
         if not any(item.get("source") == "liepin" for item in source_health):
-            source_health.insert(0, {"source": "liepin", "status": "ok", "enabled": True, "label": "猎聘"})
+            source_health.insert(0, {**get_source_health("liepin"), "label": "猎聘"})
         source_health.append(current_zhilian)
     return templates.TemplateResponse(
         request,

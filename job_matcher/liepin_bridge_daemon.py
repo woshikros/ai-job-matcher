@@ -22,6 +22,24 @@ def _usable_result(result: Any, action: str) -> bool:
     )
 
 
+async def choose_liepin_connection(targets, payload, dispatch):
+    """Only try another profile when no page was read. Never fan out UI reads."""
+    last = {'ok': False, 'error': 'No extension returned a usable result'}
+    for target in targets:
+        last = await dispatch(target, payload)
+        if not isinstance(last, dict):
+            return {'ok':False, 'error':'Invalid extension result'}
+        data = last.get('data') or {}
+        if isinstance(data, dict) and any(data.get(k) for k in ('security_check', 'login_required', 'environment_risk')):
+            return last
+        if last.get('ok'):
+            return last
+        error = str(last.get('error') or '')
+        if not any(marker in error for marker in ('Liepin chat tab required', '请先在Chrome中打开并登录猎聘', 'Unsupported command')):
+            return last
+    return last
+
+
 async def run_daemon() -> None:
     extensions: dict[str, dict[str, Any]] = {}
     changed = asyncio.Event()
@@ -58,14 +76,10 @@ async def run_daemon() -> None:
         except (json.JSONDecodeError, ValueError):
             return web.json_response({"ok": False, "error": "Invalid JSON"}, status=400)
         action = str(payload.get("action") or "")
-        if action not in {"extract_liepin_chat_overview", "extract_liepin_chat_history"} or not payload.get("id"):
+        if action not in {"extract_liepin_chat_overview", "extract_liepin_chat_history", "extract_liepin_detail"} or not payload.get("id"):
             return web.json_response({"ok": False, "error": "Unsupported command"}, status=400)
         targets = sorted(extensions.values(), key=lambda item: float(item["connected_at"]), reverse=True)
-        results = await asyncio.gather(*(dispatch(target, payload) for target in targets))
-        for result in results:
-            if _usable_result(result, action):
-                return web.json_response(result)
-        return web.json_response(next((item for item in results if isinstance(item, dict)), {"ok": False, "error": "No usable result"}))
+        return web.json_response(await choose_liepin_connection(targets, payload, dispatch))
 
     async def extension_ws(request: web.Request) -> web.WebSocketResponse:
         ws = web.WebSocketResponse(heartbeat=20)

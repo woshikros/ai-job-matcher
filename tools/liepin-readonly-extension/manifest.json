@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "AI Job Matcher - 猎聘只读沟通桥接",
-  "version": "1.0.0",
-  "description": "只读取已登录猎聘候选人端的会话列表与用户选择的聊天记录。",
+  "name": "AI Job Matcher - 猎聘只读桥接",
+  "version": "1.1.0",
+  "description": "只读取猎聘岗位详情、会话列表与用户选择的聊天记录，不发送或投递。",
   "permissions": ["scripting", "tabs", "alarms"],
   "host_permissions": ["https://*.liepin.com/*", "http://127.0.0.1:19826/*"],
   "background": {"service_worker": "background.js"},

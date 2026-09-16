@@ -24,7 +24,7 @@ $candidateOutput = Join-Path $projectRoot "reports\$reportDate-candidates.json"
 Push-Location $projectRoot
 try {
     & $python -m job_matcher.zhilian_validation --report-date $reportDate
-    if ($LASTEXITCODE -ne 0) { throw "Zhilian validation failed." }
+    if ($LASTEXITCODE -ne 0) { Write-Warning "Zhilian validation failed; continue with Liepin and report source status." }
     $dailyArgs = @("-m", "job_matcher.daily_report", "--pages", $Pages, "--report-date", $reportDate, "--prepare-output", $candidateOutput)
     if ($ResumePath) { $dailyArgs += @("--resume", $ResumePath) }
     if ($Address) { $dailyArgs += @("--address", $Address) }

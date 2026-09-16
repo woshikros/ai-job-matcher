@@ -71,8 +71,7 @@ def ensure_bridge_daemon() -> None:
         raise LiepinBridgeError("猎聘本机桥接服务启动失败，请查看 logs/liepin_bridge.log", "BRIDGE_START_FAILED")
 
 
-def _extension_command(action: str, *, params: dict[str, Any], wait_for_extension: float = 30.0) -> dict[str, Any]:
-    url = "https://c.liepin.com/"
+def _extension_command(action: str, url: str = "https://c.liepin.com/", *, params: dict[str, Any] | None = None, wait_for_extension: float = 30.0) -> dict[str, Any]:
     parsed = urlparse(url)
     host = (parsed.hostname or "").lower().rstrip(".")
     if parsed.scheme != "https" or not (host == "liepin.com" or host.endswith(".liepin.com")):
@@ -89,7 +88,7 @@ def _extension_command(action: str, *, params: dict[str, Any], wait_for_extensio
                 "BRIDGE_EXTENSION_DISCONNECTED",
             )
         time.sleep(0.5)
-    command = {"id": uuid.uuid4().hex, "action": action, "url": url, "params": params}
+    command = {"id": uuid.uuid4().hex, "action": action, "url": url, "params": params or {}}
     try:
         result = _read_json("/command", method="POST", payload=command, timeout=35)
     except LiepinBridgeError as exc:

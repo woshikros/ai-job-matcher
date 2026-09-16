@@ -4,7 +4,6 @@ import argparse
 import hashlib
 import json
 import re
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass
 from datetime import date, datetime
 from difflib import SequenceMatcher
@@ -15,7 +14,11 @@ from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 from .branding import get_source_logos
 from .candidate_profile import get_candidate_profile, profile_facts, profile_is_complete, profile_queries
-from .cli_client import search_jobs
+from .cli_client import search_jobs, LiepinCliError
+from .daily_cache import CachedReads
+from .runtime_files import atomic_json
+from .liepin_details import read_details
+from .liepin_reader import LiepinReader
 from .greetings import validate_complete_greeting
 from .job_detail import fetch_job_detail
 from .job_safety import clean_job_text, evaluate_eligibility, extract_deadline, posting_status
@@ -212,12 +215,14 @@ def _score(job: dict[str, Any], detail: str, resume_text: str, evaluation_date: 
     )
 
 
-def collect_liepin_candidates(addresses: list[str], queries: list[str], pages: int, salary_floor: int) -> list[dict[str, Any]]:
+def collect_liepin_candidates(addresses: list[str], queries: list[str], pages: int, salary_floor: int, cache=None) -> list[dict[str, Any]]:
     unique: dict[str, dict[str, Any]] = {}
     for address in addresses:
         for query in queries:
             for page in range(pages):
-                for job in search_jobs({"jobName": query, "address": address, "page": page}):
+                filters = {"jobName": query, "address": address, "page": page}
+                found = cache.call(['search', filters], lambda: search_jobs(filters)) if cache else search_jobs(filters)
+                for job in found:
                     job = normalise_provider_job(job, "liepin")
                     key = job["jobId"]
                     if key and salary_meets_upper_floor(job.get("salary"), salary_floor): unique[key] = job
@@ -288,27 +293,28 @@ def market_fit_priority(item: ReportJob) -> int:
 def _selection_sort_key(item: ReportJob) -> tuple[Any, ...]:
     return item.score, market_fit_priority(item), item.posting_status == "closing_soon", item.salary
 
-def enforce_recruiter_mix(selected: list[ReportJob], candidate_pool: list[ReportJob], threshold: int, max_jobs: int, max_headhunter_share: int, headhunter_free_top_n: int) -> list[ReportJob]:
-    target_size = min(len(selected), max_jobs)
-    non_headhunters = sorted([item for item in selected if item.recruiter_type != "headhunter"], key=_selection_sort_key, reverse=True)
-    seen = {item.job_id for item in non_headhunters}
-    for item in sorted(candidate_pool, key=_selection_sort_key, reverse=True):
-        if len(non_headhunters) >= target_size or item.job_id in seen or item.recruiter_type == "headhunter": continue
-        item.is_supplemental = item.score < threshold; non_headhunters.append(item); seen.add(item.job_id)
-    headhunter_limit = target_size * max_headhunter_share // 100 if len(non_headhunters) >= headhunter_free_top_n else 0
-    headhunters = []
-    for item in sorted(candidate_pool, key=_selection_sort_key, reverse=True):
-        if len(headhunters) >= headhunter_limit or item.job_id in seen or item.recruiter_type != "headhunter": continue
-        item.is_supplemental = item.score < threshold; headhunters.append(item); seen.add(item.job_id)
-    combined = non_headhunters + headhunters
-    while headhunters and len(headhunters) * 100 > len(combined) * max_headhunter_share:
-        removed = headhunters.pop(); combined.remove(removed)
-    non_headhunters = sorted([item for item in combined if item.recruiter_type != "headhunter"], key=_selection_sort_key, reverse=True)
-    headhunters = sorted([item for item in combined if item.recruiter_type == "headhunter"], key=_selection_sort_key, reverse=True)
-    if len(non_headhunters) < headhunter_free_top_n: return non_headhunters
-    top = non_headhunters[:headhunter_free_top_n]
-    tail = sorted(non_headhunters[headhunter_free_top_n:] + headhunters, key=_selection_sort_key, reverse=True)
-    return (top + tail)[:max_jobs]
+def enforce_recruiter_mix(selected: list[ReportJob], candidate_pool: list[ReportJob], threshold: int, max_jobs: int, max_headhunter_share: int, headhunter_free_top_n: int, fallback_count: int = 5) -> list[ReportJob]:
+    target = min(len(selected), max_jobs)
+    pool = {job.job_id: job for job in candidate_pool + selected}
+    ordered = sorted(pool.values(), key=_selection_sort_key, reverse=True)
+    best, best_key = [], (-1, -1, -1)
+    for head_count in range(min(target * max_headhunter_share // 100, sum(j.recruiter_type == 'headhunter' for j in ordered)) + 1):
+        chosen, low_count = [], 0
+        for is_head, capacity in ((True, head_count), (False, target - head_count)):
+            accepted = 0
+            for job in ordered:
+                if accepted >= capacity or (job.recruiter_type == 'headhunter') != is_head: continue
+                low = job.score < threshold
+                if low and low_count >= fallback_count: continue
+                chosen.append(job); low_count += low; accepted += 1
+        heads = sum(j.recruiter_type == 'headhunter' for j in chosen)
+        if heads * 100 > len(chosen) * max_headhunter_share or (heads and len(chosen) - heads < headhunter_free_top_n): continue
+        key = (sum(j.score >= threshold for j in chosen), len(chosen), sum(j.score for j in chosen))
+        if key > best_key: best, best_key = chosen, key
+    non_heads = sorted([j for j in best if j.recruiter_type != 'headhunter'], key=_selection_sort_key, reverse=True)
+    top = non_heads[:headhunter_free_top_n]
+    for job in best: job.is_supplemental = job.score < threshold
+    return top + sorted([j for j in best if j not in top], key=_selection_sort_key, reverse=True)
 
 def select_jobs(
     results: list[ReportJob], threshold: int | None = None, max_jobs: int = 30,
@@ -324,16 +330,17 @@ def select_jobs(
     max_headhunter_share = int(max_headhunter_share if max_headhunter_share is not None else profile.get("max_headhunter_share", 20))
     headhunter_free_top_n = int(headhunter_free_top_n if headhunter_free_top_n is not None else profile.get("headhunter_free_top_n", 3))
     excluded = [item for item in results if item.eligibility_verdict == "fail"]
+    for item in results: item.is_supplemental = False
     for item in excluded: item.is_excluded = True; item.is_supplemental = False
     ordered = sorted([item for item in results if item.eligibility_verdict != "fail"], key=_selection_sort_key, reverse=True)
     high = [item for item in ordered if item.score >= threshold]
     selected_high = high[:max_jobs]
     if len(selected_high) >= minimum_high:
-        return enforce_recruiter_mix(selected_high, high, threshold, max_jobs, max_headhunter_share, headhunter_free_top_n) + excluded
+        return enforce_recruiter_mix(selected_high, high, threshold, max_jobs, max_headhunter_share, headhunter_free_top_n, fallback_count) + excluded
     low = [item for item in ordered if consider_threshold <= item.score < threshold][:fallback_count]
     for item in low: item.is_supplemental = True
     candidate_pool = [item for item in ordered if item.score >= consider_threshold]
-    selected = enforce_recruiter_mix(selected_high + low, candidate_pool, threshold, max_jobs, max_headhunter_share, headhunter_free_top_n)
+    selected = enforce_recruiter_mix(selected_high + low, candidate_pool, threshold, max_jobs, max_headhunter_share, headhunter_free_top_n, fallback_count)
     return selected + excluded
 
 
@@ -346,20 +353,33 @@ def collect_report_jobs(resume_path: Path | None = None, address: str | None = N
     if not resume_text or not addresses or not queries: raise ValueError("请先在面板的“我的求职档案”中上传简历，并设置城市和目标岗位方向")
     salary_floor = int(profile.get("salary_upper_floor", DEFAULT_SALARY_UPPER_FLOOR))
     excluded_ids, excluded_fingerprints = get_excluded_identities("liepin")
-    candidates = [job for job in collect_liepin_candidates(addresses, queries, pages, salary_floor) if str(job.get("jobId", "")) not in excluded_ids]
-    candidates = candidates[:120]
     detailed: list[tuple[dict[str, Any], str]] = []
-    with ThreadPoolExecutor(max_workers=5) as executor:
-        future_map = {executor.submit(fetch_job_detail, str(job.get("jobDetailUrl", ""))): job for job in candidates if job.get("jobDetailUrl")}
-        for future in as_completed(future_map):
-            try:
-                job = future_map[future]
-                fetched = future.result()
-                if fetched.published_at:
-                    job["publishedAt"] = fetched.published_at
-                detailed.append((job, fetched.text))
-            except RuntimeError:
-                continue
+    run_date = (report_date_value or date.today()).isoformat()
+    try:
+        cache = CachedReads(Path('data/collection-cache') / run_date / 'liepin.json')
+        candidates = [job for job in collect_liepin_candidates(addresses, queries, pages, salary_floor, cache) if str(job.get('jobId', '')) not in excluded_ids][:120]
+        reader = LiepinReader(fetch_job_detail)
+        events = []
+        def record_event(event):
+            events.append(event)
+            atomic_json(cache.path.with_name('liepin-detail-diagnostics.json'), events)
+        def read_detail(job):
+            url = str(job['jobDetailUrl'])
+            def fetch():
+                value = reader(url)
+                return {'text': value.text, 'published_at': value.published_at, 'read_mode': reader.mode}
+            return cache.call(['detail', url], fetch)
+        batch = read_details([job for job in candidates if job.get('jobDetailUrl')], read_detail, on_result=record_event)
+        for job, fetched in batch.completed:
+            if fetched['published_at']: job['publishedAt'] = fetched['published_at']
+            detailed.append((job, fetched['text']))
+        missing = sum(not job.get('jobDetailUrl') for job in candidates)
+        failed = batch.failures + batch.skipped + missing
+        record_source_validation('liepin', run_date, {'passed': bool(detailed) and not failed,
+            'detail_success':len(detailed), 'detail_total':len(candidates), 'result_count':len(candidates),
+            'error':f'候选{len(candidates)}，正文成功{len(detailed)}，失败{batch.failures}，未读取{batch.skipped}，缺少链接{missing}；{batch.reason}' if failed or not detailed else ''})
+    except (LiepinCliError, RuntimeError, OSError, ValueError) as exc:
+        record_source_validation('liepin', run_date, {'passed':False, 'error':f'猎聘采集未完成：{type(exc).__name__}: {exc}'})
     results = [
         item for item in (_score(job, detail, resume_text, report_date_value, profile) for job, detail in detailed)
         if item.job_id not in excluded_ids and item.fingerprint not in excluded_fingerprints
@@ -394,7 +414,7 @@ def collect_report_jobs(resume_path: Path | None = None, address: str | None = N
             if detail_success < min(4, detail_total):
                 raise ZhilianReadError("智联正式采集的完整JD读取成功率不足", "JOB_DETAIL_INCOMPLETE")
         except ZhilianReadError as exc:
-            record_source_validation("zhilian", date.today().isoformat(), {
+            record_source_validation("zhilian", (report_date_value or date.today()).isoformat(), {
                 "passed": False, "error": f"正式采集失败：{exc.code}: {exc}",
                 "search_count": len(queries) * len(addresses), "result_count": len(zhilian_candidates),
                 "detail_success": locals().get("detail_success", 0),
@@ -524,7 +544,7 @@ def render_report(
     env = Environment(loader=FileSystemLoader(Path(__file__).parent.parent / "templates"), autoescape=select_autoescape(["html"]))
     output_path.parent.mkdir(parents=True, exist_ok=True)
     source_health = [
-        {"source": "liepin", "status": "ok", "enabled": True, "label": "猎聘"},
+        {**get_source_health("liepin"), "label": "猎聘"},
         {**get_source_health("zhilian"), "label": "智联招聘"},
     ]
     source_labels = {"liepin": "猎聘", "zhilian": "智联招聘"}
