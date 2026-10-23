@@ -6,7 +6,8 @@ import urllib.error
 import urllib.request
 from urllib.parse import urlsplit
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
+import calendar
 from html.parser import HTMLParser
 
 
@@ -70,8 +71,20 @@ class JobDetail:
 
 
 def extract_platform_update_date(raw: str, as_of: date | None = None) -> str:
-    reference = as_of or date.today()
+    reference = as_of or datetime.now(timezone(timedelta(hours=8))).date()
     text = html.unescape(str(raw or ""))
+    iso = re.fullmatch(r"\s*(20\d{2}-\d{2}-\d{2})(?:[T ].*)?\s*", text)
+    if iso:
+        try:
+            return date.fromisoformat(iso[1]).isoformat()
+        except ValueError:
+            return ""
+    numeric = re.search(r"(20\d{2})[-/.](\d{1,2})[-/.](\d{1,2})\s*(?:更新|发布)", text)
+    if numeric:
+        try:
+            return date(*map(int, numeric.groups())).isoformat()
+        except ValueError:
+            return ""
     full = re.search(r"(20\d{2})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日\s*(?:更新|发布)", text)
     if full:
         try:
@@ -86,6 +99,18 @@ def extract_platform_update_date(raw: str, as_of: date | None = None) -> str:
                 candidate = date(reference.year - 1, candidate.month, candidate.day)
             return candidate.isoformat()
         except ValueError:
+            return ""
+    relative = re.search(r"(?<!\d)(\d+)\s*(天|日|周|星期|个月|月|年)前\s*(?:更新|发布)", text)
+    if relative:
+        count, unit = int(relative[1]), relative[2]
+        try:
+            if unit in {'天', '日', '周', '星期'}:
+                return (reference - timedelta(days=count * (7 if unit in {'周', '星期'} else 1))).isoformat()
+            months = count * (12 if unit == '年' else 1)
+            year, month0 = divmod(reference.year * 12 + reference.month - 1 - months, 12)
+            month = month0 + 1
+            return date(year, month, min(reference.day, calendar.monthrange(year, month)[1])).isoformat()
+        except (ValueError, OverflowError):
             return ""
     if re.search(r"昨天\s*(?:更新|发布)", text):
         return (reference - timedelta(days=1)).isoformat()

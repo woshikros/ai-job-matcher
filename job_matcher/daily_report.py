@@ -15,13 +15,13 @@ from jinja2 import Environment, FileSystemLoader, select_autoescape
 from .branding import get_source_logos
 from .candidate_profile import get_candidate_profile, profile_facts, profile_is_complete, profile_queries
 from .cli_client import search_jobs, LiepinCliError
-from .daily_cache import CachedReads
+from .daily_cache import CachedReads, CachedReadBlocked
 from .runtime_files import atomic_json
 from .liepin_details import read_details
 from .liepin_reader import LiepinReader
 from .greetings import validate_complete_greeting
-from .job_detail import fetch_job_detail
-from .job_safety import clean_job_text, evaluate_eligibility, extract_deadline, posting_status
+from .job_detail import fetch_job_detail, extract_platform_update_date
+from .job_safety import clean_job_text, evaluate_eligibility, extract_deadline, posting_status, stale_update_reason
 from .profile_config import load_candidate_profile
 from .resume import extract_resume_text
 from .recruiting import classify_recruiter
@@ -118,6 +118,7 @@ class ReportJob:
     score_version: str = "v2"
     priority_threshold: int = 70
     consider_threshold: int = 0
+    manual_review: dict[str, Any] | None = None
 
 
 def _normalise_identity(value: str) -> str:
@@ -127,7 +128,7 @@ def _normalise_identity(value: str) -> str:
 
 
 def _fingerprint(company: str, detail: str) -> str:
-    core = _normalise_identity(detail)[:500]
+    core = re.sub(r'\s+', '', detail).casefold()
     raw = f"{_normalise_identity(company)}|{core}".encode("utf-8")
     return hashlib.sha256(raw).hexdigest()[:24]
 
@@ -168,6 +169,8 @@ def _greeting_focus(title: str, detail: str, matched: list[str]) -> list[str]:
 def _score(job: dict[str, Any], detail: str, resume_text: str, evaluation_date: date | None = None, profile: dict[str, Any] | None = None) -> ReportJob:
     profile = profile or get_candidate_profile()
     safe = clean_job_text(detail); detail = safe.text
+    update = extract_platform_update_date(str(job.get("updateText") or job.get("publishedAt") or job.get("publishTime") or ""), evaluation_date)
+    job = {**job, "publishedAt":update}
     deadline = extract_deadline(job.get("deadline"), detail, evaluation_date); deadline_state = posting_status(deadline, evaluation_date)
     target_roles = profile.get("target_roles", []) or [str(job.get("jobName", ""))]
     match = score_job(resume_text, {**job, "description": detail}, target_roles, profile.get("cities", []), int(profile.get("salary_upper_floor", 0)))
@@ -175,6 +178,7 @@ def _score(job: dict[str, Any], detail: str, resume_text: str, evaluation_date: 
         resume_text, job, detail, deadline_state, profile.get("cities", []), profile.get("excluded_keywords", []),
         strict_matching=bool(profile.get("strict_matching", True)),
         exclude_staffing_agencies=bool(profile.get("exclude_staffing_agencies", True)),
+        as_of=evaluation_date, max_update_age_days=int(profile.get("max_job_update_age_days",30)),
     )
     eligibility_reasons = list(dict.fromkeys(eligibility.reasons + match.hard_knockouts))
     eligibility_verdict = "fail" if match.hard_knockouts or eligibility.verdict == "fail" else eligibility.verdict
@@ -217,28 +221,39 @@ def _score(job: dict[str, Any], detail: str, resume_text: str, evaluation_date: 
 
 def collect_liepin_candidates(addresses: list[str], queries: list[str], pages: int, salary_floor: int, cache=None) -> list[dict[str, Any]]:
     unique: dict[str, dict[str, Any]] = {}
+    buckets = []
     for address in addresses:
         for query in queries:
             for page in range(pages):
                 filters = {"jobName": query, "address": address, "page": page}
                 found = cache.call(['search', filters], lambda: search_jobs(filters)) if cache else search_jobs(filters)
+                bucket = []
                 for job in found:
                     job = normalise_provider_job(job, "liepin")
+                    if not salary_meets_upper_floor(job.get("salary"), salary_floor):
+                        continue
                     key = job["jobId"]
-                    if key and salary_meets_upper_floor(job.get("salary"), salary_floor): unique[key] = job
-    return sorted(unique.values(), key=_metadata_score, reverse=True)
+                    if key:
+                        unique[key] = job
+                        bucket.append(job)
+                buckets.append(sorted(bucket, key=_metadata_score, reverse=True))
+    ordered = {}
+    for position in range(max((len(bucket) for bucket in buckets), default=0)):
+        for bucket in buckets:
+            if position < len(bucket):
+                job = bucket[position]
+                ordered.setdefault(job['jobId'], unique[job['jobId']])
+    return list(ordered.values())
 
 
 def _deduplicate_results(results: list[ReportJob]) -> list[ReportJob]:
-    seen_titles: set[tuple[str, str, str]] = set()
-    seen_fingerprints: set[tuple[str, str]] = set()
+    seen_ids: set[tuple[str, str]] = set()
     unique = []
     for item in sorted(results, key=lambda row: row.score, reverse=True):
-        title_key = (item.source, _normalise_identity(item.name), _normalise_identity(item.company))
-        fingerprint_key = (item.source, item.fingerprint)
-        if title_key in seen_titles or fingerprint_key in seen_fingerprints:
+        id_key = (item.source, item.source_job_id)
+        if id_key in seen_ids:
             continue
-        seen_titles.add(title_key); seen_fingerprints.add(fingerprint_key); unique.append(item)
+        seen_ids.add(id_key); unique.append(item)
     return unique
 
 
@@ -321,6 +336,7 @@ def select_jobs(
     minimum_high: int | None = None, fallback_count: int | None = None,
     consider_threshold: int | None = None, max_headhunter_share: int | None = None,
     headhunter_free_top_n: int | None = None,
+    evaluation_date: date | None = None,
 ) -> list[ReportJob]:
     profile = get_candidate_profile()
     threshold = int(threshold if threshold is not None else profile.get("priority_threshold", DEFAULT_PRIORITY_THRESHOLD))
@@ -329,6 +345,11 @@ def select_jobs(
     fallback_count = int(fallback_count if fallback_count is not None else profile.get("cautious_fallback_count", 5))
     max_headhunter_share = int(max_headhunter_share if max_headhunter_share is not None else profile.get("max_headhunter_share", 20))
     headhunter_free_top_n = int(headhunter_free_top_n if headhunter_free_top_n is not None else profile.get("headhunter_free_top_n", 3))
+    for item in results:
+        reason=stale_update_reason(item.published_at,evaluation_date,int(profile.get('max_job_update_age_days',30)))
+        if reason:
+            item.is_excluded=True;item.eligibility_verdict='fail';item.score=min(item.score,49)
+            item.eligibility_reasons=list(dict.fromkeys((item.eligibility_reasons or [])+[reason]))
     excluded = [item for item in results if item.eligibility_verdict == "fail"]
     for item in results: item.is_supplemental = False
     for item in excluded: item.is_excluded = True; item.is_supplemental = False
@@ -388,15 +409,16 @@ def collect_report_jobs(resume_path: Path | None = None, address: str | None = N
     if zhilian_health.get("enabled"):
         zhilian_ids, zhilian_fingerprints = get_excluded_identities("zhilian")
         zhilian_candidates: dict[str, dict[str, Any]] = {}
+        zhilian_cache=CachedReads(Path("data/collection-cache")/run_date/"zhilian.json")
         try:
             for city in addresses:
                 for query in queries:
                     for page in range(1, min(pages, 2) + 1):
-                        for job in search_zhilian_jobs(query, city=city, page=page):
+                        for job in zhilian_cache.call(["search",query,city,page],lambda:search_zhilian_jobs(query,city=city,page=page)):
                             job = normalise_provider_job(job, "zhilian")
                             if job["jobId"] not in zhilian_ids and salary_meets_upper_floor(job.get("salary"), salary_floor): zhilian_candidates[job["jobId"]] = job
-            if len(zhilian_candidates) < 5:
-                raise ZhilianReadError("智联正式采集返回的有效岗位不足5个", "EMPTY_RESULTS")
+            if not zhilian_candidates:
+                raise ZhilianReadError("智联正式采集没有符合基础条件的岗位", "EMPTY_RESULTS")
             detail_total = 0
             detail_success = 0
             for job in sorted(zhilian_candidates.values(), key=_metadata_score, reverse=True)[:60]:
@@ -404,18 +426,19 @@ def collect_report_jobs(resume_path: Path | None = None, address: str | None = N
                 try:
                     detail = str(job.get("embeddedDetail") or "")
                     if len(detail) < 80:
-                        detail = fetch_zhilian_detail(job).text
+                        detail = zhilian_cache.call(["detail",job["jobId"]],lambda:fetch_zhilian_detail(job).text)
                     item = _score(job, detail, resume_text, report_date_value, profile)
-                except ZhilianReadError:
+                except ZhilianReadError as exc:
+                    if exc.code in {"SECURITY_CHECK","LOGIN_REQUIRED","RATE_LIMITED","HTTP_ERROR","NETWORK_ERROR","PAGE_CHANGED"}: raise
                     continue
                 detail_success += 1
                 if item.fingerprint not in zhilian_fingerprints:
                     results.append(item)
             if detail_success < min(4, detail_total):
                 raise ZhilianReadError("智联正式采集的完整JD读取成功率不足", "JOB_DETAIL_INCOMPLETE")
-        except ZhilianReadError as exc:
+        except (ZhilianReadError, CachedReadBlocked) as exc:
             record_source_validation("zhilian", (report_date_value or date.today()).isoformat(), {
-                "passed": False, "error": f"正式采集失败：{exc.code}: {exc}",
+                "passed": False, "error": f"正式采集失败：{getattr(exc,'code','DAILY_READ_BLOCKED')}: {exc}",
                 "search_count": len(queries) * len(addresses), "result_count": len(zhilian_candidates),
                 "detail_success": locals().get("detail_success", 0),
                 "detail_total": locals().get("detail_total", 0),
@@ -477,9 +500,35 @@ def validate_greetings(jobs: list[ReportJob], greetings: dict[str, str]) -> None
         validated.append((greeting, item.duplicate_group))
 
 
+def apply_saved_review(item: ReportJob, previous) -> None:
+    old = asdict(previous) if isinstance(previous, ReportJob) else previous
+    review = old.get('manual_review') if isinstance(old, dict) else None
+    if not review or not (item.fingerprint == old.get('fingerprint') or item.detail == old.get('detail')):
+        return
+    item.manual_review = {**review, 'fingerprint':item.fingerprint}
+    reason = str(review.get('reason') or '已保存人工复核结论')
+    item.eligibility_reasons = list(dict.fromkeys((item.eligibility_reasons or []) + [reason]))
+    item.gaps = list(dict.fromkeys(item.gaps + [reason]))
+    if review.get('decision') == 'exclude':
+        item.eligibility_verdict='fail'; item.is_excluded=True; item.verdict=reason
+    elif review.get('decision') == 'cautious' and not item.is_excluded:
+        item.eligibility_verdict='flag'; item.score=min(item.score,recommendation_threshold(item)-1)
+
+
 def write_prepared_report(jobs: list[ReportJob], path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps([asdict(item) for item in jobs], ensure_ascii=False, indent=2), encoding="utf-8")
+    previous={j.job_id:j for j in load_prepared_jobs(path)} if path.exists() else {}
+    greeting_path=path.with_name(f'{path.stem}-greetings.json')
+    try: old_text=json.loads(greeting_path.read_text(encoding='utf-8'))
+    except (OSError,ValueError): old_text={}
+    for item in jobs:
+        if item.job_id in previous:
+            apply_saved_review(item,previous[item.job_id])
+    selected=select_jobs(jobs,evaluation_date=date.fromisoformat(path.name[:10]) if re.match(r'\d{4}-\d{2}-\d{2}',path.name) else None)
+    retained={j.job_id:old_text[j.job_id] for j in selected if is_priority_job(j) and j.job_id in previous and j.job_id in old_text and previous[j.job_id].fingerprint==j.fingerprint and previous[j.job_id].recruiter_type==j.recruiter_type}
+    atomic_json(greeting_path,retained)
+    atomic_json(path,[asdict(item) for item in jobs])
+    atomic_json(path.with_name(path.stem+'-source-health.json'),[{**get_source_health(source),'label':label} for source,label in [('liepin','猎聘'),('zhilian','智联招聘')]])
     prompt_path = path.with_suffix(".prompt.md")
     greeting_path = path.with_name(f"{path.stem}-greetings.json")
     profile = load_candidate_profile(); candidate = get_candidate_profile(); candidate_facts = profile_facts(candidate)
@@ -535,6 +584,7 @@ def render_report(
     report_date: str,
     address: str = "深圳",
     require_greetings: bool = True,
+    source_health_override=None, pool_summary=None,
 ) -> list[ReportJob]:
     if require_greetings:
         validate_greetings(jobs, greetings)
@@ -547,6 +597,7 @@ def render_report(
         {**get_source_health("liepin"), "label": "猎聘"},
         {**get_source_health("zhilian"), "label": "智联招聘"},
     ]
+    if source_health_override is not None: source_health=source_health_override
     source_labels = {"liepin": "猎聘", "zhilian": "智联招聘"}
     output_path.write_text(
         env.get_template("daily_report.html").render(
@@ -554,7 +605,7 @@ def render_report(
             address=address, jobs=jobs, qualified=sum(is_priority_job(item) for item in jobs),
             supplemental=sum(item.is_supplemental and not item.is_excluded for item in jobs),
             excluded_count=sum(item.is_excluded for item in jobs),
-            source_health=source_health, source_filter="all", source_labels=source_labels,
+            source_health=source_health, source_filter="all", source_labels=source_labels, pool_summary=pool_summary,
             source_logos=get_source_logos(),
             application_stats=get_application_statistics(),
             candidate_profile=candidate, resume_name=get_setting("resume_name", "未上传"),
@@ -581,20 +632,26 @@ def main() -> None:
 
     if args.prepare_output:
         if not args.resume and not profile_is_complete(): parser.error("请先在面板完成求职档案，或临时提供 --resume 与 --address")
-        jobs = select_jobs(collect_report_jobs(args.resume, args.address, args.pages, date.fromisoformat(args.report_date)))
+        jobs = collect_report_jobs(args.resume, args.address, args.pages, date.fromisoformat(args.report_date))
         write_prepared_report(jobs, args.prepare_output)
         print(json.dumps({"count": len(jobs), "qualified": sum(is_priority_job(j) for j in jobs), "prepared": str(args.prepare_output.resolve())}, ensure_ascii=False))
         return
     if args.output and not args.candidates_json and not args.greetings_json and (args.resume or profile_is_complete()):
         jobs = select_jobs(collect_report_jobs(args.resume, args.address, args.pages, date.fromisoformat(args.report_date)))
+        jobs=select_jobs(jobs,evaluation_date=date.fromisoformat(args.report_date))
         render_report(jobs, {}, args.output, args.report_date, args.address or "、".join(get_candidate_profile().get("cities", [])), require_greetings=False)
         print(json.dumps({"count": len(jobs), "qualified": sum(is_priority_job(j) for j in jobs), "output": str(args.output.resolve())}, ensure_ascii=False))
         return
     if not (args.candidates_json and args.greetings_json and args.output):
         parser.error("可用 --resume 和 --output 直接生成无招呼语报告；带招呼语生成需要 --candidates-json、--greetings-json 和 --output")
-    jobs = load_prepared_jobs(args.candidates_json)
+    pool = load_prepared_jobs(args.candidates_json)
+    jobs = select_jobs(pool,evaluation_date=date.fromisoformat(args.report_date))
     greetings = json.loads(args.greetings_json.read_text(encoding="utf-8"))
-    render_report(jobs, greetings, args.output, args.report_date, args.address or "、".join(get_candidate_profile().get("cities", [])))
+    health_file=args.candidates_json.with_name(args.candidates_json.stem+"-source-health.json")
+    health=json.loads(health_file.read_text(encoding="utf-8")) if health_file.exists() else None
+    eligible=[j for j in pool if not j.is_excluded and j.score>=int(get_candidate_profile().get("consider_threshold",75))]
+    coverage={"pool_total":len(pool),"above_consider":len(eligible),"displayed":sum(not j.is_excluded for j in jobs)}
+    render_report(jobs, greetings, args.output, args.report_date, args.address or "、".join(get_candidate_profile().get("cities", [])),source_health_override=health,pool_summary=coverage)
     print(json.dumps({"count": len(jobs), "qualified": sum(is_priority_job(j) for j in jobs), "output": str(args.output.resolve())}, ensure_ascii=False))
 
 

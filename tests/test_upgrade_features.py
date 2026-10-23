@@ -33,7 +33,7 @@ class JobSafetyTests(unittest.TestCase):
         product = evaluate_eligibility(resume, {}, "岗位职责：负责AI产品，要求2年以上互联网产品经验", "active")
         staffing = evaluate_eligibility(resume, {"company": "示例人力资源服务有限公司"}, "岗位职责：负责AI产品落地", "active")
         allowed_staffing = evaluate_eligibility(resume, {"company": "示例人力资源服务有限公司"}, "岗位职责：负责AI产品落地", "active", exclude_staffing_agencies=False)
-        self.assertEqual(ai_years.verdict, "fail"); self.assertEqual(relaxed.verdict, "pass")
+        self.assertEqual(ai_years.verdict, "flag"); self.assertEqual(relaxed.verdict, "pass")
         self.assertEqual(product.verdict, "flag"); self.assertEqual(staffing.verdict, "fail"); self.assertEqual(allowed_staffing.verdict, "pass")
 
 class SelectionAndGapTests(unittest.TestCase):

@@ -9,10 +9,20 @@ from pathlib import Path
 from typing import Any
 
 from .storage import record_source_validation
+from .candidate_profile import get_candidate_profile, ROLE_QUERY_MAP
 from .zhilian_client import ZhilianReadError, fetch_zhilian_detail, search_zhilian_jobs
+from .daily_cache import CachedReads, CachedReadBlocked
+from .job_safety import detail_content_issue
+from .runtime_files import atomic_json
 
 
 VALIDATION_QUERIES = ("FDE", "AI解决方案架构师", "AI产品经理")
+
+
+def validation_queries():
+    roles = get_candidate_profile().get('target_roles', [])
+    primary = list(dict.fromkeys(ROLE_QUERY_MAP.get(role, (role,))[0] for role in roles))
+    return tuple(primary[:3]) or VALIDATION_QUERIES
 
 
 def run_validation(report_date: str, output_dir: Path = Path("reports")) -> dict[str, Any]:
@@ -20,23 +30,34 @@ def run_validation(report_date: str, output_dir: Path = Path("reports")) -> dict
     result: dict[str, Any] = {
         "date": report_date, "passed": False, "search_count": 0, "result_count": 0,
         "detail_success": 0, "detail_total": 0, "stable_ids": False,
-        "queries": [], "jobs": [], "error": "",
+        "queries": [], "jobs": [], "error": "", 'phase':'connection', 'phase_status':'running', 'current_query':'', 'error_code':'',
     }
+    json_path = output_dir / f'zhilian-validation-{report_date}.json'
+    cache_path = Path('data/collection-cache') / report_date / 'zhilian.json' if output_dir == Path('reports') else output_dir / 'zhilian-reads.json'
+    cache = CachedReads(cache_path)
+    def checkpoint(phase, **values):
+        result.update(phase=phase, **values)
+        atomic_json(json_path, result)
+    checkpoint('connection')
     try:
+        queries = validation_queries()
         unique: dict[str, dict[str, Any]] = {}
         successful_queries = 0
         first_results: list[dict[str, Any]] = []
-        for query in VALIDATION_QUERIES:
-            jobs = search_zhilian_jobs(query, city="深圳", page=1)
+        for query in queries:
+            checkpoint('search', current_query=query)
+            jobs = cache.call(['search',query,'深圳',1], lambda:search_zhilian_jobs(query, city="深圳", page=1))
             result["search_count"] += 1
             result["queries"].append({"query": query, "count": len(jobs)})
             if jobs:
                 successful_queries += 1
-            if query == VALIDATION_QUERIES[0]:
+            if query == queries[0]:
                 first_results = jobs
             for job in jobs:
                 unique[job["jobId"]] = job
-        repeated = search_zhilian_jobs(VALIDATION_QUERIES[0], city="深圳", page=1)
+            checkpoint('search', result_count=len(unique))
+        checkpoint('stable_ids',current_query=queries[0])
+        repeated = cache.call(['stability',queries[0],'深圳',1], lambda:search_zhilian_jobs(queries[0], city="深圳", page=1))
         result["search_count"] += 1
         first_ids = {item["jobId"] for item in first_results}
         repeated_ids = {item["jobId"] for item in repeated}
@@ -45,6 +66,7 @@ def run_validation(report_date: str, output_dir: Path = Path("reports")) -> dict
         result["result_count"] = len(unique)
         sample = list(unique.values())[:5]
         result["detail_total"] = len(sample)
+        checkpoint('details',current_query='')
         for job in sample:
             preview_job = {key: job.get(key) for key in (
                 "jobId", "sourceJobId", "jobName", "company", "location", "salary",
@@ -52,11 +74,17 @@ def run_validation(report_date: str, output_dir: Path = Path("reports")) -> dict
             )}
             result["jobs"].append(preview_job)
             try:
-                preview_job["detail"] = fetch_zhilian_detail(job).text
+                text = str(job.get('embeddedDetail') or '')
+                if detail_content_issue(text):
+                    text = cache.call(['detail',job['jobId']], lambda:fetch_zhilian_detail(job).text)
+                issue = detail_content_issue(text)
+                if issue: raise ZhilianReadError(issue, 'JOB_DETAIL_INCOMPLETE')
+                preview_job["detail"] = text
                 result["detail_success"] += 1
+                checkpoint('details')
             except ZhilianReadError as exc:
                 preview_job["detail_error"] = f"{exc.code}: {exc}"
-                if exc.code == "SECURITY_CHECK":
+                if exc.code in {'SECURITY_CHECK','LOGIN_REQUIRED','RATE_LIMITED','HTTP_ERROR','NETWORK_ERROR','PAGE_CHANGED'}:
                     raise
         all_shenzhen = bool(unique) and all("深圳" in str(item.get("location", "")) for item in unique.values())
         result["passed"] = (
@@ -67,6 +95,12 @@ def run_validation(report_date: str, output_dir: Path = Path("reports")) -> dict
             result["error"] = "未达到深圳搜索、详情成功率或岗位ID稳定性门槛"
     except ZhilianReadError as exc:
         result["error"] = f"{exc.code}: {exc}"
+        result['error_code'] = exc.code
+    except (CachedReadBlocked, OSError, ValueError) as exc:
+        result['error_code'] = 'DAILY_READ_BLOCKED' if isinstance(exc,CachedReadBlocked) else type(exc).__name__
+        result['error'] = f"{result['error_code']}: {exc}"
+    result['phase_status'] = 'complete' if result['passed'] else 'failed'
+    if result['passed']: result['phase'] = 'complete'
     result["duration_seconds"] = round(time.monotonic() - started, 2)
     output_dir.mkdir(parents=True, exist_ok=True)
     json_path = output_dir / f"zhilian-validation-{report_date}.json"

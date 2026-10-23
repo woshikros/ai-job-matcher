@@ -9,7 +9,7 @@ import unicodedata
 from dataclasses import dataclass, field
 from typing import Any, Iterable
 
-from .job_safety import clean_job_text
+from .job_safety import clean_job_text, role_content, _mandatory_clauses, location_matches_city, has_term
 from .salary import parse_monthly_salary_upper
 
 
@@ -99,7 +99,7 @@ def _as_list(value: str | Iterable[str] | None) -> list[str]:
 
 def _present_groups(text: str, groups: dict[str, tuple[str, ...]]) -> list[str]:
     lowered = text.lower()
-    return [label for label, terms in groups.items() if any(term.lower() in lowered for term in terms)]
+    return [label for label, terms in groups.items() if any(has_term(lowered, term.lower()) for term in terms)]
 
 
 def _coverage_score(requested: list[str], candidate: list[str], maximum: int) -> int:
@@ -165,7 +165,7 @@ def _experience_education_score(resume_text: str, job: dict[str, Any], descripti
 def _location_salary_score(job: dict[str, Any], target_cities: Iterable[str] | None, salary_floor: int) -> int:
     score, location = 0, str(job.get("location") or job.get("address") or "")
     cities = [str(item) for item in (target_cities or []) if str(item)]
-    if cities and any(city in location for city in cities): score += 3
+    if cities and location_matches_city(location, cities): score += 3
     upper = parse_monthly_salary_upper(job.get("salary"))
     if salary_floor > 0 and upper is not None and upper >= salary_floor: score += 2
     return score
@@ -173,13 +173,16 @@ def _location_salary_score(job: dict[str, Any], target_cities: Iterable[str] | N
 
 def score_job(resume_text: str, job: dict[str, Any], target_title: str | Iterable[str] = "", target_cities: Iterable[str] | None = None, salary_floor: int = 0) -> MatchResult:
     resume_text = unicodedata.normalize("NFKC", str(resume_text or ""))
-    description, title = job_text(job), str(job.get("jobName") or job.get("title") or "")
+    description = next((clean_job_text(job[key]).text for key in ("description","detail","jobDetail","jobDesc","embeddedDetail") if str(job.get(key) or "").strip()), "")
+    description = role_content(description)
+    mandatory = _mandatory_clauses(description)
+    title = str(job.get("jobName") or job.get("title") or "")
     target_roles = _as_list(target_title) or ([title] if title else [])
     direction_ok, direction_score, direction_evidence = evaluate_role_direction(title, description, target_roles)
     req_cap, can_cap = _present_groups(description, CAPABILITY_GROUPS), _present_groups(resume_text, CAPABILITY_GROUPS)
-    req_tech, can_tech = _present_groups(description, TECH_GROUPS), _present_groups(resume_text, TECH_GROUPS)
+    req_tech, can_tech = _present_groups(mandatory, TECH_GROUPS), _present_groups(resume_text, TECH_GROUPS)
     req_bus, can_bus = _present_groups(description, BUSINESS_GROUPS), _present_groups(resume_text, BUSINESS_GROUPS)
-    blockers = _hard_requirements(resume_text, description.lower(), job)
+    blockers = _hard_requirements(resume_text, mandatory.lower(), job)
     if not direction_ok: blockers.extend(direction_evidence)
     breakdown = {
         "岗位方向": direction_score, "核心职责": _coverage_score(req_cap, can_cap, 25),
@@ -189,7 +192,7 @@ def score_job(resume_text: str, job: dict[str, Any], target_title: str | Iterabl
     }
     score = min(sum(breakdown.values()), 49) if blockers else sum(breakdown.values())
     matched = list(dict.fromkeys([x for x in req_cap if x in can_cap] + [x for x in req_tech if x in can_tech] + [x for x in req_bus if x in can_bus]))
-    missing = list(dict.fromkeys([x for x in req_tech if x not in can_tech] + [x for x in req_cap if x not in can_cap] + _missing_technical_terms(description, resume_text)))
+    missing = list(dict.fromkeys([x for x in req_tech if x not in can_tech] + [x for x in req_cap if x not in can_cap] + _missing_technical_terms(mandatory, resume_text)))
     evidence = direction_evidence + [f"{label}：{value}分" for label, value in breakdown.items()]
     reason = f"按目标方向、职责、技术、业务、经历和地点薪资评分；优势为{'、'.join(matched[:4]) or '暂无充分证据'}"
     if blockers or missing: reason += f"；主要缺口为{'、'.join((blockers + missing)[:3])}"

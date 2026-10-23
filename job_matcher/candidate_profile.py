@@ -38,6 +38,7 @@ DEFAULT_PROFILE: dict[str, Any] = {
     "cautious_fallback_count": 5,
     "max_headhunter_share": 20,
     "headhunter_free_top_n": 3,
+    "max_job_update_age_days": 30,
 }
 
 
@@ -93,6 +94,7 @@ def get_candidate_profile() -> dict[str, Any]:
     result["cautious_fallback_count"] = _int(result.get("cautious_fallback_count"), 5, 0, 10)
     result["max_headhunter_share"] = _int(result.get("max_headhunter_share"), 20, 0, 100)
     result["headhunter_free_top_n"] = _int(result.get("headhunter_free_top_n"), 3, 0, 10)
+    result["max_job_update_age_days"] = _int(result.get("max_job_update_age_days"), 30, 0, 3650)
     return result
 
 
@@ -112,6 +114,7 @@ def save_candidate_profile(profile: dict[str, Any]) -> dict[str, Any]:
         "cautious_fallback_count": _int(profile.get("cautious_fallback_count"), 5, 0, 10),
         "max_headhunter_share": _int(profile.get("max_headhunter_share"), 20, 0, 100),
         "headhunter_free_top_n": _int(profile.get("headhunter_free_top_n"), 3, 0, 10),
+        "max_job_update_age_days": _int(profile.get("max_job_update_age_days"), 30, 0, 3650),
     }
     cleaned["consider_threshold"] = min(cleaned["consider_threshold"], cleaned["priority_threshold"])
     save_setting("candidate_profile", cleaned)
